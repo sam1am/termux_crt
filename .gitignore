@@ -1,0 +1,33 @@
+# Android / Gradle build outputs
+build/
+**/build/
+.gradle/
+.cxx/
+.externalNativeBuild/
+captures/
+
+# IDE / tooling
+.idea/
+*.iml
+.kotlin/
+.DS_Store
+
+# Local environment (paths, SDK locations, secrets)
+local.properties
+
+# Termux bootstrap archives — downloaded on demand by the `downloadBootstraps`
+# Gradle task; never commit (each is ~28 MB).
+app/src/main/cpp/bootstrap-*.zip
+
+# Release signing material. The committed `app/testkey_untrusted.jks` is
+# Termux's well-known *public* debug key (same one shipped upstream) — keep
+# that. Anything else (real release keystores, keystore.properties) stays out.
+keystore.properties
+*.keystore
+release.jks
+*.pem
+*.p12
+
+# Logs / scratch
+*.log
+.gradletasknamecache
