@@ -7,14 +7,10 @@
 > official Termux project, is not affiliated with the Termux maintainers, and
 > has had no security or compatibility review.
 >
-> Expect rough edges: no extra-keys toolbar, no persistent sessions, fresh
-> shell on every launch, no copy/paste UI, possibly broken IME/accessibility,
-> and meaningfully higher battery use than vanilla Termux. **Don't use this
-> as your daily terminal.**
+> Expect rough edges.
 >
 > **No support, no roadmap, unlikely to receive updates** unless there's
-> sustained outside interest. Issues and PRs may sit indefinitely. If you
-> want a maintained CRT terminal, fork it.
+> sustained outside interest. Issues and PRs may sit indefinitely. 
 
 An Android terminal that renders Termux's `TerminalView` through a CRT-style
 fragment shader: scanlines, barrel curvature, RGB phosphor mask, chromatic
@@ -146,10 +142,6 @@ copies, and merging upstream changes into them is a manual job.
 
 ## Known limitations
 
-- No bottom toolbar (Ctrl, Esc, Tab, arrows). Hardware keyboard only for
-  control characters.
-- No copy/paste UI — selection handles compile in but aren't surfaced.
-- No persistent session — the shell starts fresh on each launch.
 - Capture bitmap re-renders every invalidate; could skip when the emulator
   hasn't dirtied.
 - Shader is GLES 2; GLES 3 would unlock real bloom, separable blur, etc.
