@@ -2,15 +2,15 @@
 
 > **⚠️ Experimental — not for general use.**
 >
-> This is a proof-of-concept fork of [Termux](https://github.com/termux/termux-app)
-> that runs the terminal through a CRT-style fragment shader. It is **not** an
+> This is a proof-of-concept *extension* of [Termux](https://github.com/termux/termux-app)
+> that renders the terminal through a CRT-style fragment shader. It is **not** an
 > official Termux project, is not affiliated with the Termux maintainers, and
 > has had no security or compatibility review.
 >
 > Expect rough edges.
 >
 > **No support, no roadmap, unlikely to receive updates** unless there's
-> sustained outside interest. Issues and PRs may sit indefinitely. 
+> sustained outside interest. Issues and PRs may sit indefinitely.
 
 An Android terminal that renders Termux's `TerminalView` through a CRT-style
 fragment shader: scanlines, barrel curvature, RGB phosphor mask, chromatic
@@ -25,13 +25,34 @@ aberration, vignette.
               (drawn through crt.frag at 60fps)
 ```
 
+## How it installs alongside Termux
+
+Termux CRT is a **separate APK** (`applicationId = com.termux.crt`) that runs
+on top of an already-installed Termux. It does **not** ship its own bootstrap.
+At runtime it reads `/data/data/com.termux/files/usr` directly to find the
+shell, libraries, and your `$HOME`.
+
+This works because:
+
+1. The Manifest declares `android:sharedUserId="com.termux"`, so Android
+   assigns this app the same Linux UID as Termux and grants it access to
+   Termux's private data directory.
+2. The APK is signed with `app/testkey_untrusted.jks`, which is the same
+   public dev keystore Termux uses to sign its GitHub-release APKs. Android
+   requires both apps share a signing key before honoring `sharedUserId`.
+
+You must have **Termux installed from the [official GitHub releases](https://github.com/termux/termux-app/releases)**.
+The F-Droid build of Termux will **not** work — F-Droid re-signs APKs with a
+different key, so the shared-UID handshake fails.
+
 ## Architecture
 
 ```
 TermuxActivity (vendored from termux-app)
    │
    ├── TerminalView                ← real TerminalView, alpha=0, in the view tree
-   │      └── TerminalSession      ← shell PTY via Termux's native code
+   │      └── TerminalSession      ← shell PTY via libtermux.so
+   │            (execs Termux's installed shell from /data/data/com.termux/files/usr/bin)
    │
    ├── TerminalViewMirror          ← OnPreDrawListener that captures every draw
    │                                  of the TerminalView into an offscreen Bitmap
@@ -41,11 +62,10 @@ TermuxActivity (vendored from termux-app)
                                      quad sampling it through crt.frag
 ```
 
-`termux-app` is pulled in as a git submodule for reference; the parts we
+`termux-app` is pulled in as a git submodule for reference. The parts we
 actually build against (`terminal-emulator`, `terminal-view`, `termux-shared`,
-plus a modified copy of the `app/` module) live as sibling Gradle modules in
-this repo. The native PTY helper (`libtermux.so`) is built by the app's
-`ndkBuild` block pointing at the vendored `Android.mk`.
+plus a modified copy of the `app/` module) live as sibling Gradle modules.
+The native PTY helper (`libtermux.so`) is built by `terminal-emulator/src/main/jni/`.
 
 Each frame:
 
@@ -59,26 +79,35 @@ Each frame:
 The TerminalView stays at `alpha = 0` over the GLSurfaceView, so it owns
 focus + soft-keyboard input while the shader output is what the user sees.
 
+## Install
+
+1. Install Termux from <https://github.com/termux/termux-app/releases> and open
+   it once so the bootstrap unpacks.
+2. Build (below) or download a `termux-crt_debug.apk` and `adb install` it.
+3. Launch "Termux CRT" from the launcher.
+
+If Termux isn't installed when you open Termux CRT, you'll get a dialog
+telling you so and offering to open the releases page.
+
 ## Build
 
 Requirements:
 
 - JDK 17
 - Android SDK with platform `android-36` (compileSdk) and `android-28` (targetSdk)
-- Android NDK (Termux pins 29.0.14206865; the build will try to use whatever
-  matches `ndkVersion` in `gradle.properties`)
+- Android NDK (`ndkVersion=29.0.14206865` in `gradle.properties`) — needed by
+  `terminal-emulator` for `libtermux.so`
 - Android Studio (Iguana / Koala+) or standalone Gradle
-
-The Gradle wrapper (`gradlew`, `gradlew.bat`, and `gradle/wrapper/`) is
-checked in and pinned to Gradle **9.2.1**, so just:
 
 ```bash
 git clone --recurse-submodules <this-repo>
 ./gradlew :app:assembleDebug
-adb install -r app/build/outputs/apk/debug/app-debug.apk
+adb install -r app/build/outputs/apk/debug/termux-crt_debug.apk
 ```
 
-If you cloned without `--recurse-submodules`:
+If you cloned without `--recurse-submodules`, the `termux-app` submodule is
+reference-only — it's not required to build, but the repo expects it to be
+present:
 
 ```bash
 git submodule update --init
@@ -92,17 +121,18 @@ sdk.dir=/path/to/Android/sdk
 ndk.dir=/path/to/Android/sdk/ndk/<version>
 ```
 
-The first build downloads ~110 MB of Termux bootstrap archives into
-`app/src/main/cpp/bootstrap-*.zip` (see the `downloadBootstraps` task in
-`app/build.gradle`). These are gitignored.
-
 ### Signing
 
-Debug builds use `app/testkey_untrusted.jks` — this is Termux's *public*
-well-known debug key, vendored unchanged from upstream. The password is in
-plain text in `app/build.gradle` on purpose; it's the same as upstream Termux
-so that debug builds remain installable side-by-side with debug builds of
-official Termux. **Don't use this key for release builds.**
+Both debug and release builds use `app/testkey_untrusted.jks` — this is
+Termux's *public* dev keystore, vendored unchanged from upstream
+(`termux-app/app/testkey_untrusted.jks`, byte-identical SHA-256
+`a2ba19f2417de94dd3bdfb6ceece070cdc5f9b492af09cd5900058e860b18c7d`). The
+alias and password (`alias` / `xrj45yWGLbsO7W0v`) are in plain text in
+`app/build.gradle` on purpose: signing with this key is what lets the
+resulting APK share a UID with an installed GitHub-release Termux.
+
+Because the keystore is public, **builds of this app cannot be distributed
+through F-Droid or Play**. Sideloading is the only delivery path.
 
 ## Tweaking the shader
 
@@ -118,30 +148,27 @@ All knobs live at the top of [`app/src/main/assets/shaders/crt.frag`](app/src/ma
 | `FLICKER_AMOUNT` | 60Hz brightness flicker |
 | `BRIGHTNESS` | Global multiplier |
 
-## Why fork instead of upstreaming?
+## Why an extension, not a fork
 
-Switching `TerminalView` to render through a `GLSurfaceView` is a significant
-architectural change for what is, at best, a cosmetic feature. It adds
-battery cost, GPU-driver compatibility surface, and complications around
-IME composition, accessibility, and text selection handles. None of that
-fits the minimalism the Termux maintainers have historically applied, so
-this lives as a separate experiment rather than a PR.
+The previous iteration of this project was a hard fork of `termux-app` that
+shipped its own bootstrap. That doubled the install size, duplicated package
+management, and meant every Termux upgrade became a manual merge.
 
-The `termux-app` submodule is pinned to a specific commit. Bumping it:
+This version instead piggybacks on whatever Termux is already installed:
 
-```bash
-cd termux-app
-git fetch && git checkout <newer-commit>
-cd ..
-git add termux-app && git commit -m "bump termux-app"
-```
+- No bundled bootstrap (`apt-android-7` ~110 MB) — gone.
+- No duplicate `$HOME` — your existing Termux home, history, and packages
+  are what the CRT shell sees.
+- No `termux-bootstrap` native module — only `libtermux.so` (PTY helper) is
+  built.
 
-Note that updating the submodule alone doesn't update the vendored copies
-under `app/src/main/java/com/termux/app/` — those are intentionally edited
-copies, and merging upstream changes into them is a manual job.
+The `termux-app` submodule remains as a reference for when upstream changes
+APIs that `terminal-emulator` / `terminal-view` / `termux-shared` depend on.
 
 ## Known limitations
 
+- Requires sideloaded Termux from GitHub releases. F-Droid Termux users
+  cannot use this app (different signing key, shared UID handshake fails).
 - Capture bitmap re-renders every invalidate; could skip when the emulator
   hasn't dirtied.
 - Shader is GLES 2; GLES 3 would unlock real bloom, separable blur, etc.

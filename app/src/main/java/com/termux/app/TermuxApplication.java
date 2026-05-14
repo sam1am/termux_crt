@@ -3,7 +3,6 @@ package com.termux.app;
 import android.app.Application;
 import android.content.Context;
 
-import com.termux.BuildConfig;
 import com.termux.shared.errors.Error;
 import com.termux.shared.logger.Logger;
 import com.termux.shared.termux.TermuxBootstrap;
@@ -34,8 +33,10 @@ public class TermuxApplication extends Application {
 
         Logger.logDebug("Starting Application");
 
-        // Set TermuxBootstrap.TERMUX_APP_PACKAGE_MANAGER and TermuxBootstrap.TERMUX_APP_PACKAGE_VARIANT
-        TermuxBootstrap.setTermuxPackageManagerAndVariant(BuildConfig.TERMUX_PACKAGE_VARIANT);
+        // We don't ship our own bootstrap — we read the installed Termux's $PREFIX via sharedUserId.
+        // Termux only publishes apt-android-7 GitHub releases for the keystore we sign with, so
+        // hardcode that variant rather than reflecting into Termux's BuildConfig at startup.
+        TermuxBootstrap.setTermuxPackageManagerAndVariant("apt-android-7");
 
         // Init app wide SharedProperties loaded from termux.properties
         TermuxAppSharedProperties properties = TermuxAppSharedProperties.init(context);
