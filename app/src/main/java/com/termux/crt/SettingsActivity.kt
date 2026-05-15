@@ -1,7 +1,10 @@
 package com.termux.crt
 
+import android.app.AlertDialog
+import android.content.Intent
 import android.graphics.Color
 import android.graphics.Typeface
+import android.net.Uri
 import android.os.Bundle
 import android.view.Gravity
 import android.view.View
@@ -9,14 +12,21 @@ import android.view.ViewGroup
 import android.view.ViewGroup.LayoutParams.MATCH_PARENT
 import android.view.ViewGroup.LayoutParams.WRAP_CONTENT
 import android.widget.Button
+import android.widget.EditText
 import android.widget.LinearLayout
 import android.widget.ScrollView
 import android.widget.SeekBar
 import android.widget.Switch
 import android.widget.TextView
+import android.widget.Toast
+import androidx.activity.result.ActivityResultLauncher
+import androidx.activity.result.contract.ActivityResultContracts
 import androidx.appcompat.app.AppCompatActivity
 import androidx.core.content.edit
 import com.termux.R
+import org.json.JSONObject
+import org.json.JSONTokener
+import org.json.JSONArray
 import kotlin.math.roundToInt
 
 /**
@@ -29,10 +39,27 @@ import kotlin.math.roundToInt
  */
 class SettingsActivity : AppCompatActivity() {
 
+    // SAF launchers — registered in onCreate before the picker can fire.
+    private lateinit var exportLauncher: ActivityResultLauncher<Intent>
+    private lateinit var importLauncher: ActivityResultLauncher<Intent>
+
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         title = getString(R.string.settings_title)
         supportActionBar?.setDisplayHomeAsUpEnabled(true)
+
+        exportLauncher = registerForActivityResult(
+            ActivityResultContracts.StartActivityForResult()
+        ) { result ->
+            if (result.resultCode != RESULT_OK) return@registerForActivityResult
+            result.data?.data?.let { writeAllProfilesToUri(it) }
+        }
+        importLauncher = registerForActivityResult(
+            ActivityResultContracts.StartActivityForResult()
+        ) { result ->
+            if (result.resultCode != RESULT_OK) return@registerForActivityResult
+            result.data?.data?.let { readProfilesFromUri(it) }
+        }
 
         val s = CrtSettings.load(this)
         val density = resources.displayMetrics.density
@@ -64,6 +91,25 @@ class SettingsActivity : AppCompatActivity() {
 
         root.addView(divider(dp(1)))
 
+        // ----- Colors. -----
+        root.addView(sectionHeader("Colors"))
+        root.addView(colorRow(
+            label = "Background color",
+            initialOn = s.bgColorOverride,
+            initialColor = s.bgColor,
+            onKey = CrtSettings.KEY_BG_COLOR_ON,
+            colorKey = CrtSettings.KEY_BG_COLOR,
+        ))
+        root.addView(colorRow(
+            label = "Text color override",
+            initialOn = s.textColorOverride,
+            initialColor = s.textColor,
+            onKey = CrtSettings.KEY_TEXT_COLOR_ON,
+            colorKey = CrtSettings.KEY_TEXT_COLOR,
+        ))
+
+        root.addView(divider(dp(1)))
+
         // ----- Effects (cool-retro-term style). -----
         effectRow(root, "Bloom",          "bloom",     s.bloom)
         effectRow(root, "Burn-in",        "burnin",    s.burnin)
@@ -75,6 +121,12 @@ class SettingsActivity : AppCompatActivity() {
         effectRow(root, "Flicker",        "flicker",   s.flicker)
         effectRow(root, "Horizontal Sync", "hsync",    s.hsync)
         effectRow(root, "RGB Shift",      "rgbshift",  s.rgbShift)
+
+        root.addView(divider(dp(1)))
+
+        // ----- Profiles. -----
+        root.addView(sectionHeader("Profiles"))
+        root.addView(profilesSection())
 
         root.addView(divider(dp(1)))
 
@@ -165,6 +217,148 @@ class SettingsActivity : AppCompatActivity() {
 
     private fun saveEffect(key: String, enabled: Boolean, strength: Float) {
         CrtSettings.saveEffect(this, key, CrtSettings.Effect(enabled, strength))
+    }
+
+    /**
+     * On/off switch + a row of preset swatches + R/G/B sliders for fine
+     * tuning. Persists every change immediately to SharedPreferences under
+     * [onKey] (boolean) and [colorKey] (packed ARGB int).
+     */
+    private fun colorRow(
+        label: String,
+        initialOn: Boolean,
+        initialColor: Int,
+        onKey: String,
+        colorKey: String,
+    ): View {
+        val density = resources.displayMetrics.density
+        fun dp(v: Int) = (v * density).toInt()
+
+        val container = LinearLayout(this).apply {
+            orientation = LinearLayout.VERTICAL
+            layoutParams = LinearLayout.LayoutParams(MATCH_PARENT, WRAP_CONTENT)
+        }
+
+        var currentColor = initialColor
+
+        val sw = Switch(this).apply {
+            text = label
+            setTextColor(Color.WHITE)
+            textSize = 16f
+            isChecked = initialOn
+        }
+
+        val swatch = View(this).apply {
+            setBackgroundColor(currentColor or Color.BLACK)  // force opaque preview
+            layoutParams = LinearLayout.LayoutParams(MATCH_PARENT, dp(20)).apply {
+                topMargin = dp(4)
+                bottomMargin = dp(4)
+            }
+        }
+
+        // Three R/G/B sliders. They share `currentColor` and the swatch view.
+        fun makeChannel(
+            name: String,
+            initial: Int,
+            extract: (Int) -> Int,
+            apply: (Int, Int) -> Int,
+        ): LinearLayout {
+            val row = LinearLayout(this).apply {
+                orientation = LinearLayout.HORIZONTAL
+                layoutParams = LinearLayout.LayoutParams(MATCH_PARENT, WRAP_CONTENT)
+            }
+            val nameLabel = TextView(this).apply {
+                text = name
+                setTextColor(Color.WHITE)
+                layoutParams = LinearLayout.LayoutParams(dp(20), WRAP_CONTENT)
+            }
+            val valueLabel = TextView(this).apply {
+                text = initial.toString()
+                setTextColor(Color.WHITE)
+                gravity = Gravity.END
+                layoutParams = LinearLayout.LayoutParams(dp(36), WRAP_CONTENT)
+            }
+            val seek = SeekBar(this).apply {
+                max = 255
+                progress = initial
+                isEnabled = sw.isChecked
+                layoutParams = LinearLayout.LayoutParams(0, WRAP_CONTENT, 1f)
+                setOnSeekBarChangeListener(object : SeekBar.OnSeekBarChangeListener {
+                    override fun onProgressChanged(sb: SeekBar?, p: Int, fromUser: Boolean) {
+                        valueLabel.text = p.toString()
+                        currentColor = apply(currentColor, p)
+                        swatch.setBackgroundColor(currentColor or Color.BLACK)
+                        CrtSettings.prefs(this@SettingsActivity).edit {
+                            putInt(colorKey, currentColor)
+                        }
+                    }
+                    override fun onStartTrackingTouch(sb: SeekBar?) {}
+                    override fun onStopTrackingTouch(sb: SeekBar?) {}
+                })
+            }
+            row.addView(nameLabel)
+            row.addView(seek)
+            row.addView(valueLabel)
+            return row
+        }
+
+        val rSeek = makeChannel("R", Color.red(initialColor),
+            { Color.red(it) }, { c, v -> Color.rgb(v, Color.green(c), Color.blue(c)) })
+        val gSeek = makeChannel("G", Color.green(initialColor),
+            { Color.green(it) }, { c, v -> Color.rgb(Color.red(c), v, Color.blue(c)) })
+        val bSeek = makeChannel("B", Color.blue(initialColor),
+            { Color.blue(it) }, { c, v -> Color.rgb(Color.red(c), Color.green(c), v) })
+
+        // Preset swatches — quick picks for the common CRT phosphor colors.
+        val presetRow = LinearLayout(this).apply {
+            orientation = LinearLayout.HORIZONTAL
+            layoutParams = LinearLayout.LayoutParams(MATCH_PARENT, WRAP_CONTENT).apply {
+                topMargin = dp(4)
+                bottomMargin = dp(4)
+            }
+        }
+        val presets = intArrayOf(
+            Color.BLACK,
+            Color.rgb(0, 0x22, 0),       // dark green CRT background
+            Color.rgb(0x1A, 0x0F, 0),    // dark amber background
+            Color.WHITE,
+            Color.rgb(0x33, 0xFF, 0x33), // phosphor green
+            Color.rgb(0xFF, 0xB0, 0x00), // amber
+            Color.rgb(0x7D, 0xF9, 0xFF), // ice blue
+        )
+        for (preset in presets) {
+            presetRow.addView(View(this).apply {
+                setBackgroundColor(preset or Color.BLACK)
+                layoutParams = LinearLayout.LayoutParams(0, dp(24), 1f).apply {
+                    marginStart = dp(2)
+                    marginEnd = dp(2)
+                }
+                setOnClickListener {
+                    if (!sw.isChecked) return@setOnClickListener
+                    // Update each slider's progress; their listeners write
+                    // the new packed color to prefs and refresh the swatch.
+                    // Slider is the second child of each row (after R/G/B label).
+                    (rSeek.getChildAt(1) as SeekBar).progress = Color.red(preset)
+                    (gSeek.getChildAt(1) as SeekBar).progress = Color.green(preset)
+                    (bSeek.getChildAt(1) as SeekBar).progress = Color.blue(preset)
+                }
+            })
+        }
+
+        sw.setOnCheckedChangeListener { _, checked ->
+            CrtSettings.prefs(this@SettingsActivity).edit { putBoolean(onKey, checked) }
+            (rSeek.getChildAt(1) as SeekBar).isEnabled = checked
+            (gSeek.getChildAt(1) as SeekBar).isEnabled = checked
+            (bSeek.getChildAt(1) as SeekBar).isEnabled = checked
+        }
+
+        container.addView(sw)
+        container.addView(swatch)
+        container.addView(presetRow)
+        container.addView(rSeek)
+        container.addView(gSeek)
+        container.addView(bSeek)
+        return container
     }
 
     private fun masterToggle(initial: Boolean): View {
@@ -275,5 +469,221 @@ class SettingsActivity : AppCompatActivity() {
                 bottomMargin = (density * 8).toInt()
             }
         }
+    }
+
+    // ----- Profiles -----
+
+    private fun profilesSection(): View {
+        val density = resources.displayMetrics.density
+        fun dp(v: Int) = (v * density).toInt()
+
+        val container = LinearLayout(this).apply {
+            orientation = LinearLayout.VERTICAL
+            layoutParams = LinearLayout.LayoutParams(MATCH_PARENT, WRAP_CONTENT)
+        }
+
+        // Save-as row: name field + Save button. Captures the *current*
+        // SharedPreferences-resident settings under the typed name.
+        val nameField = EditText(this).apply {
+            hint = "Profile name"
+            setHintTextColor(Color.argb(160, 255, 255, 255))
+            setTextColor(Color.WHITE)
+            setSingleLine(true)
+            layoutParams = LinearLayout.LayoutParams(0, WRAP_CONTENT, 1f)
+        }
+        val saveBtn = Button(this).apply {
+            text = "Save"
+            layoutParams = LinearLayout.LayoutParams(WRAP_CONTENT, WRAP_CONTENT).apply {
+                marginStart = dp(8)
+            }
+        }
+        val saveRow = LinearLayout(this).apply {
+            orientation = LinearLayout.HORIZONTAL
+            gravity = Gravity.CENTER_VERTICAL
+            addView(nameField)
+            addView(saveBtn)
+            layoutParams = LinearLayout.LayoutParams(MATCH_PARENT, WRAP_CONTENT)
+        }
+        saveBtn.setOnClickListener {
+            val name = nameField.text.toString().trim()
+            if (name.isEmpty()) {
+                toast("Enter a profile name")
+                return@setOnClickListener
+            }
+            confirmIfExists(name) {
+                CrtProfileStore.save(
+                    this,
+                    CrtProfile(name, CrtSettings.load(this)),
+                )
+                toast("Saved \"$name\"")
+                recreate()
+            }
+        }
+        container.addView(saveRow)
+
+        // Export/Import row.
+        val exportBtn = Button(this).apply {
+            text = "Export…"
+            layoutParams = LinearLayout.LayoutParams(0, WRAP_CONTENT, 1f).apply {
+                marginEnd = dp(4)
+            }
+            setOnClickListener { launchExport() }
+        }
+        val importBtn = Button(this).apply {
+            text = "Import…"
+            layoutParams = LinearLayout.LayoutParams(0, WRAP_CONTENT, 1f).apply {
+                marginStart = dp(4)
+            }
+            setOnClickListener { launchImport() }
+        }
+        val ioRow = LinearLayout(this).apply {
+            orientation = LinearLayout.HORIZONTAL
+            addView(exportBtn)
+            addView(importBtn)
+            layoutParams = LinearLayout.LayoutParams(MATCH_PARENT, WRAP_CONTENT).apply {
+                topMargin = dp(8)
+            }
+        }
+        container.addView(ioRow)
+
+        // Saved profiles list.
+        val profiles = CrtProfileStore.list(this)
+        if (profiles.isEmpty()) {
+            container.addView(TextView(this).apply {
+                text = "No saved profiles yet."
+                setTextColor(Color.argb(160, 255, 255, 255))
+                layoutParams = LinearLayout.LayoutParams(MATCH_PARENT, WRAP_CONTENT).apply {
+                    topMargin = dp(8)
+                }
+            })
+        } else {
+            profiles.forEach { container.addView(profileRow(it)) }
+        }
+        return container
+    }
+
+    private fun profileRow(profile: CrtProfile): View {
+        val density = resources.displayMetrics.density
+        fun dp(v: Int) = (v * density).toInt()
+
+        val row = LinearLayout(this).apply {
+            orientation = LinearLayout.HORIZONTAL
+            gravity = Gravity.CENTER_VERTICAL
+            layoutParams = LinearLayout.LayoutParams(MATCH_PARENT, WRAP_CONTENT).apply {
+                topMargin = dp(6)
+            }
+        }
+        row.addView(TextView(this).apply {
+            text = profile.name
+            setTextColor(Color.WHITE)
+            textSize = 15f
+            layoutParams = LinearLayout.LayoutParams(0, WRAP_CONTENT, 1f)
+        })
+        row.addView(Button(this).apply {
+            text = "Load"
+            setOnClickListener {
+                CrtSettings.saveAll(this@SettingsActivity, profile.settings)
+                toast("Loaded \"${profile.name}\"")
+                recreate()
+            }
+        })
+        row.addView(Button(this).apply {
+            text = "Delete"
+            layoutParams = LinearLayout.LayoutParams(WRAP_CONTENT, WRAP_CONTENT).apply {
+                marginStart = dp(4)
+            }
+            setOnClickListener {
+                AlertDialog.Builder(this@SettingsActivity)
+                    .setTitle("Delete profile")
+                    .setMessage("Delete \"${profile.name}\"?")
+                    .setNegativeButton(android.R.string.cancel, null)
+                    .setPositiveButton(android.R.string.ok) { _, _ ->
+                        CrtProfileStore.delete(this@SettingsActivity, profile.name)
+                        recreate()
+                    }
+                    .show()
+            }
+        })
+        return row
+    }
+
+    private fun confirmIfExists(name: String, onConfirmed: () -> Unit) {
+        if (!CrtProfileStore.exists(this, name)) {
+            onConfirmed()
+            return
+        }
+        AlertDialog.Builder(this)
+            .setTitle("Overwrite profile?")
+            .setMessage("A profile named \"$name\" already exists.")
+            .setNegativeButton(android.R.string.cancel, null)
+            .setPositiveButton("Overwrite") { _, _ -> onConfirmed() }
+            .show()
+    }
+
+    private fun launchExport() {
+        val intent = Intent(Intent.ACTION_CREATE_DOCUMENT).apply {
+            addCategory(Intent.CATEGORY_OPENABLE)
+            type = "application/json"
+            putExtra(Intent.EXTRA_TITLE, "crt-profiles.json")
+        }
+        try {
+            exportLauncher.launch(intent)
+        } catch (t: Throwable) {
+            toast("No file picker available")
+        }
+    }
+
+    private fun launchImport() {
+        val intent = Intent(Intent.ACTION_OPEN_DOCUMENT).apply {
+            addCategory(Intent.CATEGORY_OPENABLE)
+            type = "*/*"
+        }
+        try {
+            importLauncher.launch(intent)
+        } catch (t: Throwable) {
+            toast("No file picker available")
+        }
+    }
+
+    private fun writeAllProfilesToUri(uri: Uri) {
+        val profiles = CrtProfileStore.list(this)
+        if (profiles.isEmpty()) {
+            toast("No profiles to export")
+            return
+        }
+        try {
+            val bytes = CrtProfile.bundleToJson(profiles).toString(2).toByteArray()
+            contentResolver.openOutputStream(uri, "wt")?.use { it.write(bytes) }
+                ?: throw IllegalStateException("Couldn't open file for writing")
+            toast("Exported ${profiles.size} profile(s)")
+        } catch (t: Throwable) {
+            toast("Export failed: ${t.message ?: t.javaClass.simpleName}")
+        }
+    }
+
+    private fun readProfilesFromUri(uri: Uri) {
+        try {
+            val text = contentResolver.openInputStream(uri)?.use {
+                it.reader(Charsets.UTF_8).readText()
+            } ?: throw IllegalStateException("Couldn't open file for reading")
+            val parsed = when (val token = JSONTokener(text).nextValue()) {
+                is JSONObject -> CrtProfile.bundleFromJson(token)
+                is JSONArray  -> CrtProfile.bundleFromJson(token)
+                else -> throw IllegalArgumentException("Not a JSON document")
+            }
+            if (parsed.isEmpty()) {
+                toast("No profiles found in file")
+                return
+            }
+            parsed.forEach { CrtProfileStore.save(this, it) }
+            toast("Imported ${parsed.size} profile(s)")
+            recreate()
+        } catch (t: Throwable) {
+            toast("Import failed: ${t.message ?: t.javaClass.simpleName}")
+        }
+    }
+
+    private fun toast(message: String) {
+        Toast.makeText(this, message, Toast.LENGTH_SHORT).show()
     }
 }

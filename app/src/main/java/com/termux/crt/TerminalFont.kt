@@ -22,9 +22,11 @@ object TerminalFont {
     fun typeface(context: Context, font: CrtFont): Typeface {
         cache[font]?.let { return it }
         val tf = try {
-            val asset = font.assetName
-            if (asset == null) Typeface.MONOSPACE
-            else Typeface.createFromAsset(context.assets, asset)
+            when {
+                font.assetName != null -> Typeface.createFromAsset(context.assets, font.assetName)
+                font.systemFamily != null -> Typeface.create(font.systemFamily, font.systemStyle)
+                else -> Typeface.MONOSPACE
+            }
         } catch (e: Throwable) {
             Log.w(TAG, "failed to load font ${font.name}, falling back to monospace", e)
             Typeface.MONOSPACE

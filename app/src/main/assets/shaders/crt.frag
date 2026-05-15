@@ -33,6 +33,15 @@ uniform float uHsyncStrength;
 uniform float uRgbshiftOn;
 uniform float uRgbshiftStrength;
 
+// Color overrides. Each `*On` is 0/1; the color is plain linear RGB.
+// uBgColor   — fills the screen where the terminal has no content (luma≈0).
+// uTextColor — re-tints terminal output by luminance, giving a single-phosphor
+//              look (white text → chosen color; ANSI colors collapsed to mono).
+uniform float uBgColorOn;
+uniform vec3  uBgColor;
+uniform float uTextColorOn;
+uniform vec3  uTextColor;
+
 // ---------- Helpers ----------
 
 float hash(vec2 p) {
@@ -110,6 +119,24 @@ void main() {
     // additively blend; `1.8` matches the visual weight of the old inline
     // 13-tap version at default settings.
     vec3 col = sampleTerminal(uv);
+
+    // -------- Text color override (monochrome phosphor) --------
+    // Preserve luminance, swap hue. Done before bloom so the additive halo
+    // glows in the same phosphor color.
+    if (uTextColorOn > 0.5) {
+        float luma = dot(col, vec3(0.299, 0.587, 0.114));
+        col = uTextColor * luma;
+    }
+
+    // -------- Background color override --------
+    // Show the chosen background where the terminal is dark; let bright text
+    // stay as-is. smoothstep gives a soft edge so anti-aliased glyphs don't
+    // get a hard halo of background color.
+    if (uBgColorOn > 0.5) {
+        float luma = dot(col, vec3(0.299, 0.587, 0.114));
+        col = mix(uBgColor, col, smoothstep(0.0, 0.25, luma));
+    }
+
     col += sampleBloom(uv) * uBloomStrength * uBloomOn * 1.8;
 
     // -------- H-sync visible tint on slipped bands --------
@@ -158,10 +185,21 @@ void main() {
     }
 
     // -------- Ambient light --------
-    // Lift the black level — visible "screen is in a lit room" look. Stronger
-    // than before; at max strength the off-pixel is a dim warm grey.
+    // Center-focused glow — simulates a phosphor screen brighter in the
+    // middle where the electron beam dwells. Uses the chosen background
+    // color (if the override is on) as the tint, so a green CRT bg gets a
+    // green ambient lift and an amber bg gets an amber one. Falls back to
+    // a warm neutral when no bg override is set.
     if (uAmbientOn > 0.5) {
-        col += vec3(0.16, 0.13, 0.09) * uAmbientStrength;
+        vec2 ac = uv - 0.5;
+        // Squared radial distance from center; gaussian-ish falloff peaks at
+        // center (=1) and decays toward the edges (~0.05 at the corners).
+        float r2 = dot(ac, ac);
+        float halo = exp(-r2 * 6.0);
+        vec3 tint = (uBgColorOn > 0.5)
+            ? max(uBgColor, vec3(0.03))   // lift pitch-black bg to a faint glow
+            : vec3(0.22, 0.17, 0.10);     // warm neutral default
+        col += tint * halo * uAmbientStrength * 0.9;
     }
 
     // -------- Curvature-tied vignette --------

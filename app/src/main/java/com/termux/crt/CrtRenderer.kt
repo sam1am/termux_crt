@@ -45,6 +45,10 @@ class CrtRenderer(
     private var uResolutionLoc = 0
     private var uTextureSizeLoc = 0
     private var uTimeLoc = 0
+    private var uBgColorOnLoc = 0
+    private var uBgColorLoc = 0
+    private var uTextColorOnLoc = 0
+    private var uTextColorLoc = 0
 
     private val effectUniforms = mutableMapOf<String, Int>()  // name -> location
 
@@ -113,6 +117,10 @@ class CrtRenderer(
         uResolutionLoc  = GLES30.glGetUniformLocation(program, "uResolution")
         uTextureSizeLoc = GLES30.glGetUniformLocation(program, "uTextureSize")
         uTimeLoc        = GLES30.glGetUniformLocation(program, "uTime")
+        uBgColorOnLoc   = GLES30.glGetUniformLocation(program, "uBgColorOn")
+        uBgColorLoc     = GLES30.glGetUniformLocation(program, "uBgColor")
+        uTextColorOnLoc = GLES30.glGetUniformLocation(program, "uTextColorOn")
+        uTextColorLoc   = GLES30.glGetUniformLocation(program, "uTextColor")
 
         // Each effect has matched on/strength uniforms in the shader. Cache the
         // locations once so we don't re-look-them-up every frame.
@@ -208,6 +216,7 @@ class CrtRenderer(
         GLES30.glUniform2f(uResolutionLoc, surfaceWidth.toFloat(), surfaceHeight.toFloat())
         GLES30.glUniform2f(uTextureSizeLoc, textureWidth.toFloat(), textureHeight.toFloat())
         GLES30.glUniform1f(uTimeLoc, (System.nanoTime() - startNanos) / 1_000_000_000f)
+        pushColorOverrides(s)
         pushEffects(s)
 
         GLES30.glDrawArrays(GLES30.GL_TRIANGLE_STRIP, 0, 4)
@@ -278,6 +287,23 @@ class CrtRenderer(
         push("flicker",   s.flicker)
         push("hsync",     s.hsync)
         push("rgbshift",  s.rgbShift)
+    }
+
+    private fun pushColorOverrides(s: CrtSettings) {
+        GLES30.glUniform1f(uBgColorOnLoc, if (s.bgColorOverride) 1f else 0f)
+        rgbFromColor(s.bgColor, rgb)
+        GLES30.glUniform3f(uBgColorLoc, rgb[0], rgb[1], rgb[2])
+        GLES30.glUniform1f(uTextColorOnLoc, if (s.textColorOverride) 1f else 0f)
+        rgbFromColor(s.textColor, rgb)
+        GLES30.glUniform3f(uTextColorLoc, rgb[0], rgb[1], rgb[2])
+    }
+
+    private val rgb = FloatArray(3)
+
+    private fun rgbFromColor(argb: Int, out: FloatArray) {
+        out[0] = ((argb shr 16) and 0xFF) / 255f
+        out[1] = ((argb shr 8) and 0xFF) / 255f
+        out[2] = (argb and 0xFF) / 255f
     }
 
     private fun push(key: String, e: CrtSettings.Effect) {
