@@ -1,9 +1,12 @@
+#version 300 es
 precision highp float;
 
-varying vec2 vTexCoord;
+in vec2 vTexCoord;
+out vec4 fragColor;
 
 uniform sampler2D uTexture;      // current terminal frame
 uniform sampler2D uPrevFrame;    // previous CRT output, used for burn-in
+uniform sampler2D uBloom;        // pre-computed bloom texture (downsampled)
 uniform vec2 uResolution;        // output surface in pixels
 uniform vec2 uTextureSize;       // source bitmap in pixels
 uniform float uTime;             // seconds since renderer start
@@ -38,7 +41,6 @@ float hash(vec2 p) {
     return fract(p.x * p.y);
 }
 float hash11(float n) { return fract(sin(n * 12.9898) * 43758.5453); }
-float luma(vec3 c) { return dot(c, vec3(0.299, 0.587, 0.114)); }
 
 vec2 curve(vec2 uv) {
     if (uCurvatureOn < 0.5) return uv;
@@ -50,48 +52,22 @@ vec2 curve(vec2 uv) {
 
 vec3 sampleTerminal(vec2 uv) {
     if (uRgbshiftOn < 0.5) {
-        return texture2D(uTexture, uv).rgb;
+        return texture(uTexture, uv).rgb;
     }
     float h = uRgbshiftStrength * 0.005;
     float v = uRgbshiftStrength * 0.0015;
     vec3 col;
-    col.r = texture2D(uTexture, vec2(uv.x + h, uv.y - v)).r;
-    col.g = texture2D(uTexture, uv).g;
-    col.b = texture2D(uTexture, vec2(uv.x - h, uv.y + v)).b;
+    col.r = texture(uTexture, vec2(uv.x + h, uv.y - v)).r;
+    col.g = texture(uTexture, uv).g;
+    col.b = texture(uTexture, vec2(uv.x - h, uv.y + v)).b;
     return col;
 }
 
-vec3 sampleTerminalPlain(vec2 uv) { return texture2D(uTexture, uv).rgb; }
-
-// 13-tap bloom: 3×3 inner + 4 "+" outer halo taps.
-vec3 bloom(vec2 uv) {
-    if (uBloomOn < 0.5) return vec3(0.0);
-    vec2 texel = 1.0 / uTextureSize;
-    vec3 sum = vec3(0.0);
-    float wsum = 0.0;
-    for (int j = -1; j <= 1; j++) {
-        for (int i = -1; i <= 1; i++) {
-            vec2 off = vec2(float(i), float(j)) * texel * 3.0;
-            vec3 s = sampleTerminalPlain(clamp(uv + off, vec2(0.0), vec2(1.0)));
-            float gate = smoothstep(0.30, 0.85, luma(s));
-            float w = 1.0 - 0.2 * (abs(float(i)) + abs(float(j)));
-            sum += s * gate * w;
-            wsum += w;
-        }
-    }
-    vec2 outer[4];
-    outer[0] = vec2( 1.0,  0.0);
-    outer[1] = vec2(-1.0,  0.0);
-    outer[2] = vec2( 0.0,  1.0);
-    outer[3] = vec2( 0.0, -1.0);
-    for (int k = 0; k < 4; k++) {
-        vec3 s = sampleTerminalPlain(clamp(uv + outer[k] * texel * 7.0, vec2(0.0), vec2(1.0)));
-        float gate = smoothstep(0.30, 0.85, luma(s));
-        float w = 0.5;
-        sum += s * gate * w;
-        wsum += w;
-    }
-    return (sum / wsum) * uBloomStrength * 1.8;
+// FBO textures have bottom-left origin, so we render-to-FBO with our QUAD's
+// uv convention (uv.y = 0 at screen top) and then flip y when reading them
+// back as input textures. Same trick as the burn-in `uPrevFrame` read below.
+vec3 sampleBloom(vec2 uv) {
+    return texture(uBloom, vec2(uv.x, 1.0 - uv.y)).rgb;
 }
 
 // ---------- Main ----------
@@ -124,13 +100,17 @@ void main() {
     uv = curve(uv);
 
     if (uv.x < 0.0 || uv.x > 1.0 || uv.y < 0.0 || uv.y > 1.0) {
-        gl_FragColor = vec4(0.0, 0.0, 0.0, 1.0);
+        fragColor = vec4(0.0, 0.0, 0.0, 1.0);
         return;
     }
 
     // -------- Base color + bloom --------
+    // Bloom is a real separable-Gaussian blur over a brightpass of the
+    // terminal, computed in earlier passes into uBloom. We just sample +
+    // additively blend; `1.8` matches the visual weight of the old inline
+    // 13-tap version at default settings.
     vec3 col = sampleTerminal(uv);
-    col += bloom(uv);
+    col += sampleBloom(uv) * uBloomStrength * uBloomOn * 1.8;
 
     // -------- H-sync visible tint on slipped bands --------
     // Add a faint cool tint to slipped rows so glitches are perceptible
@@ -141,7 +121,7 @@ void main() {
 
     // -------- Burn-in (phosphor persistence) --------
     if (uBurninOn > 0.5) {
-        vec3 prev = texture2D(uPrevFrame, vec2(vTexCoord.x, 1.0 - vTexCoord.y)).rgb;
+        vec3 prev = texture(uPrevFrame, vec2(vTexCoord.x, 1.0 - vTexCoord.y)).rgb;
         float decay = mix(0.85, 0.995, uBurninStrength);
         col = max(col, prev * decay);
     }
@@ -191,5 +171,5 @@ void main() {
         col *= mix(mix(1.0, 0.55, uCurvatureStrength), 1.0, pow(v, 0.4));
     }
 
-    gl_FragColor = vec4(col, 1.0);
+    fragColor = vec4(col, 1.0);
 }

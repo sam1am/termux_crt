@@ -25,7 +25,7 @@ class CrtSurfaceView @JvmOverloads constructor(
     }
 
     fun attach(source: TerminalSurface) {
-        setEGLContextClientVersion(2)
+        setEGLContextClientVersion(3)
         renderer = CrtRenderer(context.applicationContext, source)
         setRenderer(renderer)
         renderMode = RENDERMODE_CONTINUOUSLY

@@ -2,7 +2,7 @@ package com.termux.crt
 
 import android.content.Context
 import android.graphics.Bitmap
-import android.opengl.GLES20
+import android.opengl.GLES30
 import android.opengl.GLSurfaceView
 import android.opengl.GLUtils
 import java.nio.ByteBuffer
@@ -12,13 +12,24 @@ import javax.microedition.khronos.egl.EGLConfig
 import javax.microedition.khronos.opengles.GL10
 
 /**
- * Two-pass renderer:
- *   1. Sample the terminal bitmap + apply all CRT effects → FBO ping-pong target
- *   2. Blit that target to the default framebuffer
+ * Multi-pass renderer on GLES 3.0.
  *
- * The FBO step exists so the **burn-in** effect can read last frame's output as
- * an input (`uPrevFrame`). On each frame we swap which FBO is "current" vs
- * "previous", so we always have a one-frame history.
+ *   Pass 0 (only if bloom is enabled): brightpass the terminal into a
+ *           quarter-resolution FBO.
+ *   Pass 1 (only if bloom is enabled): horizontal separable Gaussian blur
+ *           of the brightpass FBO into a second quarter-res FBO.
+ *   Pass 2 (only if bloom is enabled): vertical separable Gaussian blur
+ *           back into the first quarter-res FBO. Two H/V iterations are
+ *           run to widen the kernel — still cheap at 1/4 res, gives a
+ *           soft, wide halo instead of the old chunky 13-tap.
+ *   Pass 3: render CRT effects into the current full-res FBO. Reads the
+ *           bloom result, the terminal texture, and the *previous* full-
+ *           res FBO (so the burn-in / phosphor-persistence effect can
+ *           feed back from frame N-1).
+ *   Pass 4: blit the current full-res FBO to the default framebuffer.
+ *
+ * The two full-res FBOs ping-pong every frame so burn-in always reads the
+ * previous frame's output.
  */
 class CrtRenderer(
     private val context: Context,
@@ -30,6 +41,7 @@ class CrtRenderer(
     private var aTexCoordLoc = 0
     private var uTextureLoc = 0
     private var uPrevFrameLoc = 0
+    private var uBloomLoc = 0
     private var uResolutionLoc = 0
     private var uTextureSizeLoc = 0
     private var uTimeLoc = 0
@@ -41,6 +53,19 @@ class CrtRenderer(
     private var blitTexCoordLoc = 0
     private var blitTextureLoc = 0
 
+    private var brightProgram = 0
+    private var brightPositionLoc = 0
+    private var brightTexCoordLoc = 0
+    private var brightTextureLoc = 0
+    private var brightThresholdLoc = 0
+    private var brightSoftKneeLoc = 0
+
+    private var blurProgram = 0
+    private var blurPositionLoc = 0
+    private var blurTexCoordLoc = 0
+    private var blurTextureLoc = 0
+    private var blurTexelDirLoc = 0
+
     private var terminalTexId = 0
     private var terminalTexInitialized = false
     private var textureWidth = 1
@@ -49,11 +74,18 @@ class CrtRenderer(
     private var surfaceWidth = 1
     private var surfaceHeight = 1
 
-    // Ping-pong FBO setup for burn-in.
+    // Full-res ping-pong FBOs for burn-in feedback.
     private val fboIds = IntArray(2)
     private val fboTexIds = IntArray(2)
     private var fboInitialized = false
     private var currentFbo = 0  // which of the two is "this frame's" target
+
+    // Quarter-res ping-pong FBOs for the bloom pipeline (brightpass + blur).
+    private val bloomFboIds = IntArray(2)
+    private val bloomTexIds = IntArray(2)
+    private var bloomFboInitialized = false
+    private var bloomWidth = 1
+    private var bloomHeight = 1
 
     @Volatile private var settings: CrtSettings = CrtSettings.DEFAULT
 
@@ -70,41 +102,61 @@ class CrtRenderer(
     }
 
     override fun onSurfaceCreated(gl: GL10?, config: EGLConfig?) {
-        GLES20.glClearColor(0f, 0f, 0f, 1f)
+        GLES30.glClearColor(0f, 0f, 0f, 1f)
 
         program = buildProgram(readAsset("shaders/crt.vert"), readAsset("shaders/crt.frag"))
-        aPositionLoc    = GLES20.glGetAttribLocation(program, "aPosition")
-        aTexCoordLoc    = GLES20.glGetAttribLocation(program, "aTexCoord")
-        uTextureLoc     = GLES20.glGetUniformLocation(program, "uTexture")
-        uPrevFrameLoc   = GLES20.glGetUniformLocation(program, "uPrevFrame")
-        uResolutionLoc  = GLES20.glGetUniformLocation(program, "uResolution")
-        uTextureSizeLoc = GLES20.glGetUniformLocation(program, "uTextureSize")
-        uTimeLoc        = GLES20.glGetUniformLocation(program, "uTime")
+        aPositionLoc    = GLES30.glGetAttribLocation(program, "aPosition")
+        aTexCoordLoc    = GLES30.glGetAttribLocation(program, "aTexCoord")
+        uTextureLoc     = GLES30.glGetUniformLocation(program, "uTexture")
+        uPrevFrameLoc   = GLES30.glGetUniformLocation(program, "uPrevFrame")
+        uBloomLoc       = GLES30.glGetUniformLocation(program, "uBloom")
+        uResolutionLoc  = GLES30.glGetUniformLocation(program, "uResolution")
+        uTextureSizeLoc = GLES30.glGetUniformLocation(program, "uTextureSize")
+        uTimeLoc        = GLES30.glGetUniformLocation(program, "uTime")
 
         // Each effect has matched on/strength uniforms in the shader. Cache the
         // locations once so we don't re-look-them-up every frame.
         for (key in EFFECT_KEYS) {
-            effectUniforms[onName(key)] = GLES20.glGetUniformLocation(program, onName(key))
-            effectUniforms[strName(key)] = GLES20.glGetUniformLocation(program, strName(key))
+            effectUniforms[onName(key)] = GLES30.glGetUniformLocation(program, onName(key))
+            effectUniforms[strName(key)] = GLES30.glGetUniformLocation(program, strName(key))
         }
 
         // Simple passthrough program for the FBO → screen blit.
         blitProgram = buildProgram(readAsset("shaders/crt.vert"), BLIT_FRAG_SRC)
-        blitPositionLoc = GLES20.glGetAttribLocation(blitProgram, "aPosition")
-        blitTexCoordLoc = GLES20.glGetAttribLocation(blitProgram, "aTexCoord")
-        blitTextureLoc  = GLES20.glGetUniformLocation(blitProgram, "uTexture")
+        blitPositionLoc = GLES30.glGetAttribLocation(blitProgram, "aPosition")
+        blitTexCoordLoc = GLES30.glGetAttribLocation(blitProgram, "aTexCoord")
+        blitTextureLoc  = GLES30.glGetUniformLocation(blitProgram, "uTexture")
+
+        // Bloom pre-passes: brightpass + separable Gaussian blur.
+        brightProgram = buildProgram(readAsset("shaders/crt.vert"), readAsset("shaders/brightpass.frag"))
+        brightPositionLoc  = GLES30.glGetAttribLocation(brightProgram, "aPosition")
+        brightTexCoordLoc  = GLES30.glGetAttribLocation(brightProgram, "aTexCoord")
+        brightTextureLoc   = GLES30.glGetUniformLocation(brightProgram, "uTexture")
+        brightThresholdLoc = GLES30.glGetUniformLocation(brightProgram, "uThreshold")
+        brightSoftKneeLoc  = GLES30.glGetUniformLocation(brightProgram, "uSoftKnee")
+
+        blurProgram = buildProgram(readAsset("shaders/crt.vert"), readAsset("shaders/blur.frag"))
+        blurPositionLoc = GLES30.glGetAttribLocation(blurProgram, "aPosition")
+        blurTexCoordLoc = GLES30.glGetAttribLocation(blurProgram, "aTexCoord")
+        blurTextureLoc  = GLES30.glGetUniformLocation(blurProgram, "uTexture")
+        blurTexelDirLoc = GLES30.glGetUniformLocation(blurProgram, "uTexelDir")
 
         terminalTexId = genTexture()
         terminalTexInitialized = false
         fboInitialized = false
+        bloomFboInitialized = false
     }
 
     override fun onSurfaceChanged(gl: GL10?, width: Int, height: Int) {
         surfaceWidth = width
         surfaceHeight = height
-        GLES20.glViewport(0, 0, width, height)
+        GLES30.glViewport(0, 0, width, height)
         source.onSurfaceSize(width, height)
         setupFbos(width, height)
+        // Quarter-res keeps the blur cheap and naturally widens the kernel
+        // when sampled back at full resolution. Clamp to at least 1 to avoid
+        // a zero-sized FBO on weird surface sizes.
+        setupBloomFbos(maxOf(width / 4, 1), maxOf(height / 4, 1))
     }
 
     override fun onDrawFrame(gl: GL10?) {
@@ -118,47 +170,101 @@ class CrtRenderer(
             }
         }
         if (!terminalTexInitialized) {
-            GLES20.glClear(GLES20.GL_COLOR_BUFFER_BIT)
+            GLES30.glClear(GLES30.GL_COLOR_BUFFER_BIT)
             return
         }
 
-        // ----- Pass 1: render CRT into current FBO, reading previous as uPrevFrame -----
-        val prevFbo = 1 - currentFbo
-        GLES20.glBindFramebuffer(GLES20.GL_FRAMEBUFFER, fboIds[currentFbo])
-        GLES20.glViewport(0, 0, surfaceWidth, surfaceHeight)
-        GLES20.glClear(GLES20.GL_COLOR_BUFFER_BIT)
+        // ----- Bloom pre-passes: brightpass → H blur → V blur (×2 iterations) -----
+        // Skipped when the user has bloom disabled — the main shader multiplies
+        // by uBloomOn, so even if bloomTex[0] still holds stale content from a
+        // previous "on" frame, the contribution is zeroed out.
+        val s = settings
+        if (s.bloom.enabled) renderBloom()
 
-        GLES20.glUseProgram(program)
+        // ----- Main pass: CRT effects into current full-res FBO -----
+        val prevFbo = 1 - currentFbo
+        GLES30.glBindFramebuffer(GLES30.GL_FRAMEBUFFER, fboIds[currentFbo])
+        GLES30.glViewport(0, 0, surfaceWidth, surfaceHeight)
+        GLES30.glClear(GLES30.GL_COLOR_BUFFER_BIT)
+
+        GLES30.glUseProgram(program)
         bindQuadAttribs(aPositionLoc, aTexCoordLoc)
 
-        GLES20.glActiveTexture(GLES20.GL_TEXTURE0)
-        GLES20.glBindTexture(GLES20.GL_TEXTURE_2D, terminalTexId)
-        GLES20.glUniform1i(uTextureLoc, 0)
+        GLES30.glActiveTexture(GLES30.GL_TEXTURE0)
+        GLES30.glBindTexture(GLES30.GL_TEXTURE_2D, terminalTexId)
+        GLES30.glUniform1i(uTextureLoc, 0)
 
-        GLES20.glActiveTexture(GLES20.GL_TEXTURE1)
-        GLES20.glBindTexture(GLES20.GL_TEXTURE_2D, fboTexIds[prevFbo])
-        GLES20.glUniform1i(uPrevFrameLoc, 1)
+        GLES30.glActiveTexture(GLES30.GL_TEXTURE1)
+        GLES30.glBindTexture(GLES30.GL_TEXTURE_2D, fboTexIds[prevFbo])
+        GLES30.glUniform1i(uPrevFrameLoc, 1)
 
-        GLES20.glUniform2f(uResolutionLoc, surfaceWidth.toFloat(), surfaceHeight.toFloat())
-        GLES20.glUniform2f(uTextureSizeLoc, textureWidth.toFloat(), textureHeight.toFloat())
-        GLES20.glUniform1f(uTimeLoc, (System.nanoTime() - startNanos) / 1_000_000_000f)
-        pushEffects(settings)
+        // Bloom result lives in bloomTexIds[0] after renderBloom() (V-blur
+        // writes there on the second iteration). See renderBloom() for the
+        // ping-pong details.
+        GLES30.glActiveTexture(GLES30.GL_TEXTURE2)
+        GLES30.glBindTexture(GLES30.GL_TEXTURE_2D, bloomTexIds[0])
+        GLES30.glUniform1i(uBloomLoc, 2)
 
-        GLES20.glDrawArrays(GLES20.GL_TRIANGLE_STRIP, 0, 4)
+        GLES30.glUniform2f(uResolutionLoc, surfaceWidth.toFloat(), surfaceHeight.toFloat())
+        GLES30.glUniform2f(uTextureSizeLoc, textureWidth.toFloat(), textureHeight.toFloat())
+        GLES30.glUniform1f(uTimeLoc, (System.nanoTime() - startNanos) / 1_000_000_000f)
+        pushEffects(s)
 
-        // ----- Pass 2: blit current FBO to screen -----
-        GLES20.glBindFramebuffer(GLES20.GL_FRAMEBUFFER, 0)
-        GLES20.glViewport(0, 0, surfaceWidth, surfaceHeight)
-        GLES20.glClear(GLES20.GL_COLOR_BUFFER_BIT)
+        GLES30.glDrawArrays(GLES30.GL_TRIANGLE_STRIP, 0, 4)
 
-        GLES20.glUseProgram(blitProgram)
+        // ----- Blit current FBO to screen -----
+        GLES30.glBindFramebuffer(GLES30.GL_FRAMEBUFFER, 0)
+        GLES30.glViewport(0, 0, surfaceWidth, surfaceHeight)
+        GLES30.glClear(GLES30.GL_COLOR_BUFFER_BIT)
+
+        GLES30.glUseProgram(blitProgram)
         bindQuadAttribs(blitPositionLoc, blitTexCoordLoc)
-        GLES20.glActiveTexture(GLES20.GL_TEXTURE0)
-        GLES20.glBindTexture(GLES20.GL_TEXTURE_2D, fboTexIds[currentFbo])
-        GLES20.glUniform1i(blitTextureLoc, 0)
-        GLES20.glDrawArrays(GLES20.GL_TRIANGLE_STRIP, 0, 4)
+        GLES30.glActiveTexture(GLES30.GL_TEXTURE0)
+        GLES30.glBindTexture(GLES30.GL_TEXTURE_2D, fboTexIds[currentFbo])
+        GLES30.glUniform1i(blitTextureLoc, 0)
+        GLES30.glDrawArrays(GLES30.GL_TRIANGLE_STRIP, 0, 4)
 
         currentFbo = prevFbo  // swap for next frame
+    }
+
+    private fun renderBloom() {
+        GLES30.glViewport(0, 0, bloomWidth, bloomHeight)
+
+        // Brightpass: terminal → bloomTex[0]
+        GLES30.glBindFramebuffer(GLES30.GL_FRAMEBUFFER, bloomFboIds[0])
+        GLES30.glClear(GLES30.GL_COLOR_BUFFER_BIT)
+        GLES30.glUseProgram(brightProgram)
+        bindQuadAttribs(brightPositionLoc, brightTexCoordLoc)
+        GLES30.glActiveTexture(GLES30.GL_TEXTURE0)
+        GLES30.glBindTexture(GLES30.GL_TEXTURE_2D, terminalTexId)
+        GLES30.glUniform1i(brightTextureLoc, 0)
+        GLES30.glUniform1f(brightThresholdLoc, BLOOM_THRESHOLD)
+        GLES30.glUniform1f(brightSoftKneeLoc, BLOOM_SOFT_KNEE)
+        GLES30.glDrawArrays(GLES30.GL_TRIANGLE_STRIP, 0, 4)
+
+        // Two separable-Gaussian iterations to widen the halo. Each iteration
+        // is one horizontal + one vertical pass, ping-ponging between the
+        // two bloom FBOs. After iter 1: result lives in bloomTex[0]. After
+        // iter 2: result lives in bloomTex[0] again. The main pass reads
+        // bloomTex[0].
+        val texelX = 1f / bloomWidth
+        val texelY = 1f / bloomHeight
+        for (i in 0 until BLOOM_ITERATIONS) {
+            blur(srcIdx = 0, dstIdx = 1, dirX = texelX, dirY = 0f)
+            blur(srcIdx = 1, dstIdx = 0, dirX = 0f,     dirY = texelY)
+        }
+    }
+
+    private fun blur(srcIdx: Int, dstIdx: Int, dirX: Float, dirY: Float) {
+        GLES30.glBindFramebuffer(GLES30.GL_FRAMEBUFFER, bloomFboIds[dstIdx])
+        GLES30.glClear(GLES30.GL_COLOR_BUFFER_BIT)
+        GLES30.glUseProgram(blurProgram)
+        bindQuadAttribs(blurPositionLoc, blurTexCoordLoc)
+        GLES30.glActiveTexture(GLES30.GL_TEXTURE0)
+        GLES30.glBindTexture(GLES30.GL_TEXTURE_2D, bloomTexIds[srcIdx])
+        GLES30.glUniform1i(blurTextureLoc, 0)
+        GLES30.glUniform2f(blurTexelDirLoc, dirX, dirY)
+        GLES30.glDrawArrays(GLES30.GL_TRIANGLE_STRIP, 0, 4)
     }
 
     private fun pushEffects(s: CrtSettings) {
@@ -177,55 +283,55 @@ class CrtRenderer(
     private fun push(key: String, e: CrtSettings.Effect) {
         val onLoc = effectUniforms[onName(key)] ?: return
         val strLoc = effectUniforms[strName(key)] ?: return
-        GLES20.glUniform1f(onLoc, if (e.enabled) 1f else 0f)
-        GLES20.glUniform1f(strLoc, e.strength)
+        GLES30.glUniform1f(onLoc, if (e.enabled) 1f else 0f)
+        GLES30.glUniform1f(strLoc, e.strength)
     }
 
     private fun bindQuadAttribs(positionLoc: Int, texCoordLoc: Int) {
         quadVertices.position(0)
-        GLES20.glEnableVertexAttribArray(positionLoc)
-        GLES20.glVertexAttribPointer(positionLoc, 2, GLES20.GL_FLOAT, false, STRIDE, quadVertices)
+        GLES30.glEnableVertexAttribArray(positionLoc)
+        GLES30.glVertexAttribPointer(positionLoc, 2, GLES30.GL_FLOAT, false, STRIDE, quadVertices)
 
         quadVertices.position(2)
-        GLES20.glEnableVertexAttribArray(texCoordLoc)
-        GLES20.glVertexAttribPointer(texCoordLoc, 2, GLES20.GL_FLOAT, false, STRIDE, quadVertices)
+        GLES30.glEnableVertexAttribArray(texCoordLoc)
+        GLES30.glVertexAttribPointer(texCoordLoc, 2, GLES30.GL_FLOAT, false, STRIDE, quadVertices)
     }
 
     private fun uploadBitmap(bitmap: Bitmap) {
-        GLES20.glActiveTexture(GLES20.GL_TEXTURE0)
-        GLES20.glBindTexture(GLES20.GL_TEXTURE_2D, terminalTexId)
+        GLES30.glActiveTexture(GLES30.GL_TEXTURE0)
+        GLES30.glBindTexture(GLES30.GL_TEXTURE_2D, terminalTexId)
         if (!terminalTexInitialized || bitmap.width != textureWidth || bitmap.height != textureHeight) {
-            GLUtils.texImage2D(GLES20.GL_TEXTURE_2D, 0, bitmap, 0)
+            GLUtils.texImage2D(GLES30.GL_TEXTURE_2D, 0, bitmap, 0)
             textureWidth = bitmap.width
             textureHeight = bitmap.height
             terminalTexInitialized = true
         } else {
-            GLUtils.texSubImage2D(GLES20.GL_TEXTURE_2D, 0, 0, 0, bitmap)
+            GLUtils.texSubImage2D(GLES30.GL_TEXTURE_2D, 0, 0, 0, bitmap)
         }
     }
 
     private fun setupFbos(w: Int, h: Int) {
         if (fboInitialized) {
-            GLES20.glDeleteFramebuffers(2, fboIds, 0)
-            GLES20.glDeleteTextures(2, fboTexIds, 0)
+            GLES30.glDeleteFramebuffers(2, fboIds, 0)
+            GLES30.glDeleteTextures(2, fboTexIds, 0)
         }
-        GLES20.glGenTextures(2, fboTexIds, 0)
-        GLES20.glGenFramebuffers(2, fboIds, 0)
+        GLES30.glGenTextures(2, fboTexIds, 0)
+        GLES30.glGenFramebuffers(2, fboIds, 0)
         for (i in 0..1) {
-            GLES20.glBindTexture(GLES20.GL_TEXTURE_2D, fboTexIds[i])
-            GLES20.glTexImage2D(
-                GLES20.GL_TEXTURE_2D, 0, GLES20.GL_RGBA, w, h, 0,
-                GLES20.GL_RGBA, GLES20.GL_UNSIGNED_BYTE, null,
+            GLES30.glBindTexture(GLES30.GL_TEXTURE_2D, fboTexIds[i])
+            GLES30.glTexImage2D(
+                GLES30.GL_TEXTURE_2D, 0, GLES30.GL_RGBA, w, h, 0,
+                GLES30.GL_RGBA, GLES30.GL_UNSIGNED_BYTE, null,
             )
-            GLES20.glTexParameteri(GLES20.GL_TEXTURE_2D, GLES20.GL_TEXTURE_MIN_FILTER, GLES20.GL_LINEAR)
-            GLES20.glTexParameteri(GLES20.GL_TEXTURE_2D, GLES20.GL_TEXTURE_MAG_FILTER, GLES20.GL_LINEAR)
-            GLES20.glTexParameteri(GLES20.GL_TEXTURE_2D, GLES20.GL_TEXTURE_WRAP_S, GLES20.GL_CLAMP_TO_EDGE)
-            GLES20.glTexParameteri(GLES20.GL_TEXTURE_2D, GLES20.GL_TEXTURE_WRAP_T, GLES20.GL_CLAMP_TO_EDGE)
+            GLES30.glTexParameteri(GLES30.GL_TEXTURE_2D, GLES30.GL_TEXTURE_MIN_FILTER, GLES30.GL_LINEAR)
+            GLES30.glTexParameteri(GLES30.GL_TEXTURE_2D, GLES30.GL_TEXTURE_MAG_FILTER, GLES30.GL_LINEAR)
+            GLES30.glTexParameteri(GLES30.GL_TEXTURE_2D, GLES30.GL_TEXTURE_WRAP_S, GLES30.GL_CLAMP_TO_EDGE)
+            GLES30.glTexParameteri(GLES30.GL_TEXTURE_2D, GLES30.GL_TEXTURE_WRAP_T, GLES30.GL_CLAMP_TO_EDGE)
 
-            GLES20.glBindFramebuffer(GLES20.GL_FRAMEBUFFER, fboIds[i])
-            GLES20.glFramebufferTexture2D(
-                GLES20.GL_FRAMEBUFFER, GLES20.GL_COLOR_ATTACHMENT0,
-                GLES20.GL_TEXTURE_2D, fboTexIds[i], 0,
+            GLES30.glBindFramebuffer(GLES30.GL_FRAMEBUFFER, fboIds[i])
+            GLES30.glFramebufferTexture2D(
+                GLES30.GL_FRAMEBUFFER, GLES30.GL_COLOR_ATTACHMENT0,
+                GLES30.GL_TEXTURE_2D, fboTexIds[i], 0,
             )
         }
         // Clear both FBOs to opaque black so the first frame's burn-in read
@@ -233,23 +339,55 @@ class CrtRenderer(
         // squished ghost of a previous frame at a different resolution after
         // keyboard popup/dismiss resized the surface).
         for (i in 0..1) {
-            GLES20.glBindFramebuffer(GLES20.GL_FRAMEBUFFER, fboIds[i])
-            GLES20.glClearColor(0f, 0f, 0f, 1f)
-            GLES20.glClear(GLES20.GL_COLOR_BUFFER_BIT)
+            GLES30.glBindFramebuffer(GLES30.GL_FRAMEBUFFER, fboIds[i])
+            GLES30.glClearColor(0f, 0f, 0f, 1f)
+            GLES30.glClear(GLES30.GL_COLOR_BUFFER_BIT)
         }
-        GLES20.glBindFramebuffer(GLES20.GL_FRAMEBUFFER, 0)
+        GLES30.glBindFramebuffer(GLES30.GL_FRAMEBUFFER, 0)
         fboInitialized = true
         currentFbo = 0
     }
 
+    private fun setupBloomFbos(w: Int, h: Int) {
+        if (bloomFboInitialized) {
+            GLES30.glDeleteFramebuffers(2, bloomFboIds, 0)
+            GLES30.glDeleteTextures(2, bloomTexIds, 0)
+        }
+        bloomWidth = w
+        bloomHeight = h
+        GLES30.glGenTextures(2, bloomTexIds, 0)
+        GLES30.glGenFramebuffers(2, bloomFboIds, 0)
+        for (i in 0..1) {
+            GLES30.glBindTexture(GLES30.GL_TEXTURE_2D, bloomTexIds[i])
+            GLES30.glTexImage2D(
+                GLES30.GL_TEXTURE_2D, 0, GLES30.GL_RGBA, w, h, 0,
+                GLES30.GL_RGBA, GLES30.GL_UNSIGNED_BYTE, null,
+            )
+            GLES30.glTexParameteri(GLES30.GL_TEXTURE_2D, GLES30.GL_TEXTURE_MIN_FILTER, GLES30.GL_LINEAR)
+            GLES30.glTexParameteri(GLES30.GL_TEXTURE_2D, GLES30.GL_TEXTURE_MAG_FILTER, GLES30.GL_LINEAR)
+            GLES30.glTexParameteri(GLES30.GL_TEXTURE_2D, GLES30.GL_TEXTURE_WRAP_S, GLES30.GL_CLAMP_TO_EDGE)
+            GLES30.glTexParameteri(GLES30.GL_TEXTURE_2D, GLES30.GL_TEXTURE_WRAP_T, GLES30.GL_CLAMP_TO_EDGE)
+
+            GLES30.glBindFramebuffer(GLES30.GL_FRAMEBUFFER, bloomFboIds[i])
+            GLES30.glFramebufferTexture2D(
+                GLES30.GL_FRAMEBUFFER, GLES30.GL_COLOR_ATTACHMENT0,
+                GLES30.GL_TEXTURE_2D, bloomTexIds[i], 0,
+            )
+            GLES30.glClearColor(0f, 0f, 0f, 1f)
+            GLES30.glClear(GLES30.GL_COLOR_BUFFER_BIT)
+        }
+        GLES30.glBindFramebuffer(GLES30.GL_FRAMEBUFFER, 0)
+        bloomFboInitialized = true
+    }
+
     private fun genTexture(): Int {
         val ids = IntArray(1)
-        GLES20.glGenTextures(1, ids, 0)
-        GLES20.glBindTexture(GLES20.GL_TEXTURE_2D, ids[0])
-        GLES20.glTexParameteri(GLES20.GL_TEXTURE_2D, GLES20.GL_TEXTURE_MIN_FILTER, GLES20.GL_LINEAR)
-        GLES20.glTexParameteri(GLES20.GL_TEXTURE_2D, GLES20.GL_TEXTURE_MAG_FILTER, GLES20.GL_LINEAR)
-        GLES20.glTexParameteri(GLES20.GL_TEXTURE_2D, GLES20.GL_TEXTURE_WRAP_S, GLES20.GL_CLAMP_TO_EDGE)
-        GLES20.glTexParameteri(GLES20.GL_TEXTURE_2D, GLES20.GL_TEXTURE_WRAP_T, GLES20.GL_CLAMP_TO_EDGE)
+        GLES30.glGenTextures(1, ids, 0)
+        GLES30.glBindTexture(GLES30.GL_TEXTURE_2D, ids[0])
+        GLES30.glTexParameteri(GLES30.GL_TEXTURE_2D, GLES30.GL_TEXTURE_MIN_FILTER, GLES30.GL_LINEAR)
+        GLES30.glTexParameteri(GLES30.GL_TEXTURE_2D, GLES30.GL_TEXTURE_MAG_FILTER, GLES30.GL_LINEAR)
+        GLES30.glTexParameteri(GLES30.GL_TEXTURE_2D, GLES30.GL_TEXTURE_WRAP_S, GLES30.GL_CLAMP_TO_EDGE)
+        GLES30.glTexParameteri(GLES30.GL_TEXTURE_2D, GLES30.GL_TEXTURE_WRAP_T, GLES30.GL_CLAMP_TO_EDGE)
         return ids[0]
     }
 
@@ -257,33 +395,33 @@ class CrtRenderer(
         context.assets.open(path).bufferedReader().use { it.readText() }
 
     private fun buildProgram(vertSrc: String, fragSrc: String): Int {
-        val vert = compileShader(GLES20.GL_VERTEX_SHADER, vertSrc)
-        val frag = compileShader(GLES20.GL_FRAGMENT_SHADER, fragSrc)
-        val prog = GLES20.glCreateProgram()
-        GLES20.glAttachShader(prog, vert)
-        GLES20.glAttachShader(prog, frag)
-        GLES20.glLinkProgram(prog)
+        val vert = compileShader(GLES30.GL_VERTEX_SHADER, vertSrc)
+        val frag = compileShader(GLES30.GL_FRAGMENT_SHADER, fragSrc)
+        val prog = GLES30.glCreateProgram()
+        GLES30.glAttachShader(prog, vert)
+        GLES30.glAttachShader(prog, frag)
+        GLES30.glLinkProgram(prog)
         val status = IntArray(1)
-        GLES20.glGetProgramiv(prog, GLES20.GL_LINK_STATUS, status, 0)
+        GLES30.glGetProgramiv(prog, GLES30.GL_LINK_STATUS, status, 0)
         if (status[0] == 0) {
-            val log = GLES20.glGetProgramInfoLog(prog)
-            GLES20.glDeleteProgram(prog)
+            val log = GLES30.glGetProgramInfoLog(prog)
+            GLES30.glDeleteProgram(prog)
             throw RuntimeException("Program link failed: $log")
         }
-        GLES20.glDeleteShader(vert)
-        GLES20.glDeleteShader(frag)
+        GLES30.glDeleteShader(vert)
+        GLES30.glDeleteShader(frag)
         return prog
     }
 
     private fun compileShader(type: Int, src: String): Int {
-        val shader = GLES20.glCreateShader(type)
-        GLES20.glShaderSource(shader, src)
-        GLES20.glCompileShader(shader)
+        val shader = GLES30.glCreateShader(type)
+        GLES30.glShaderSource(shader, src)
+        GLES30.glCompileShader(shader)
         val status = IntArray(1)
-        GLES20.glGetShaderiv(shader, GLES20.GL_COMPILE_STATUS, status, 0)
+        GLES30.glGetShaderiv(shader, GLES30.GL_COMPILE_STATUS, status, 0)
         if (status[0] == 0) {
-            val log = GLES20.glGetShaderInfoLog(shader)
-            GLES20.glDeleteShader(shader)
+            val log = GLES30.glGetShaderInfoLog(shader)
+            GLES30.glDeleteShader(shader)
             throw RuntimeException("Shader compile failed: $log\n$src")
         }
         return shader
@@ -294,6 +432,13 @@ class CrtRenderer(
             "bloom", "burnin", "static", "jitter", "glowline",
             "curvature", "ambient", "flicker", "hsync", "rgbshift",
         )
+
+        // Brightpass cuts off below this luma. Terminal text is usually
+        // bright on a dark background, so even a fairly aggressive threshold
+        // catches glyphs while letting the background sit at zero.
+        private const val BLOOM_THRESHOLD = 0.30f
+        private const val BLOOM_SOFT_KNEE = 0.5f
+        private const val BLOOM_ITERATIONS = 2
 
         private fun onName(key: String) = "u" + cap(key) + "On"
         private fun strName(key: String) = "u" + cap(key) + "Strength"
@@ -312,12 +457,14 @@ class CrtRenderer(
         // the top of the texture (high `t`). Our QUAD UVs map screen-top to
         // t=0, so we have to flip t when reading the FBO back.
         private const val BLIT_FRAG_SRC =
+            "#version 300 es\n" +
             "precision mediump float;\n" +
-            "varying vec2 vTexCoord;\n" +
+            "in vec2 vTexCoord;\n" +
+            "out vec4 fragColor;\n" +
             "uniform sampler2D uTexture;\n" +
             "void main() {\n" +
             "    vec2 uv = vec2(vTexCoord.x, 1.0 - vTexCoord.y);\n" +
-            "    gl_FragColor = vec4(texture2D(uTexture, uv).rgb, 1.0);\n" +
+            "    fragColor = vec4(texture(uTexture, uv).rgb, 1.0);\n" +
             "}\n"
     }
 }
