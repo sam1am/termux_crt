@@ -12,18 +12,27 @@
 > **No support, no roadmap, unlikely to receive updates** unless there's
 > sustained outside interest. Issues and PRs may sit indefinitely.
 
-An Android terminal that renders Termux's `TerminalView` through a CRT-style
-fragment shader: scanlines, barrel curvature, RGB phosphor mask, chromatic
-aberration, vignette.
+An Android terminal that drives Termux's real `TerminalView` and renders it
+through a GLES 3 CRT shader: bloom, burn-in, barrel curvature, scanline-style
+RGB shift, ambient phosphor, flicker, horizontal sync wobble, static, and
+optional single-phosphor color overrides.
 
-```
-┌──────────────────────────────────────────────────────────────┐
-│  $ uname -a                                                  │
-│  Linux localhost ...                                         │
-│  $ █                                                         │
-└──────────────────────────────────────────────────────────────┘
-              (drawn through crt.frag at 60fps)
-```
+It is an extension, not a fork — every shell, package, and `$HOME` file you
+already have in Termux is what shows up under the shader.
+
+<p align="center">
+  <img src="public/img/centcom.png" width="640" alt="Amber CRT running neofetch and htop">
+</p>
+
+<p align="center">
+  <img src="public/img/greenday.png" width="320" alt="Green phosphor with neofetch">
+  <img src="public/img/ibm.png" width="320" alt="IBM blue htop">
+</p>
+
+<p align="center">
+  <img src="public/img/greenday2.png" width="320" alt="Green phosphor htop with the soft keyboard open">
+  <img src="public/img/matrix.png" width="320" alt="Matrix-style green characters with heavy curvature">
+</p>
 
 ## How it installs alongside Termux
 
@@ -73,21 +82,62 @@ Each frame:
    `TerminalViewMirror` draws the current terminal grid into an offscreen
    `Bitmap` under a `ReentrantLock`.
 2. `CrtRenderer.onDrawFrame()` on the GL thread acquires the bitmap, uploads
-   the pixels via `GLUtils.texSubImage2D`, and draws a fullscreen quad
-   sampling that texture through `crt.frag`.
+   the pixels via `GLUtils.texSubImage2D`, runs a brightpass + separable
+   Gaussian blur into a downsampled bloom texture, then draws a fullscreen
+   quad sampling the source and bloom through `crt.frag` (GLES 3).
+3. The previous CRT output is sampled back in as `uPrevFrame` so the burn-in
+   effect can decay.
 
 The TerminalView stays at `alpha = 0` over the GLSurfaceView, so it owns
 focus + soft-keyboard input while the shader output is what the user sees.
+The keyboard, IME, and copy/paste all hit the real `TerminalView` — the
+shader pass is purely visual.
 
 ## Install
 
-1. Install Termux from <https://github.com/termux/termux-app/releases> and open
-   it once so the bootstrap unpacks.
-2. Build (below) or download a `termux-crt_debug.apk` and `adb install` it.
+Termux CRT does not bundle a shell, packages, or a `$HOME`. It piggybacks on
+an installed copy of Termux. You need **both** APKs, in this order:
+
+1. **Install Termux first.** Grab the debug build from the official Termux
+   GitHub releases: <https://github.com/termux/termux-app/releases>. Pick the
+   `termux-app_*_debug_universal.apk` (or the per-ABI debug APK matching your
+   device). Open it once so the bootstrap unpacks.
+   - The Play Store build of Termux is unmaintained and the F-Droid build is
+     signed with a different key — neither will work. It has to be the
+     GitHub-release debug APK.
+2. **Install Termux CRT.** Build it (see below) or `adb install` a downloaded
+   `termux-crt_debug.apk`.
 3. Launch "Termux CRT" from the launcher.
 
 If Termux isn't installed when you open Termux CRT, you'll get a dialog
 telling you so and offering to open the releases page.
+
+## Using it
+
+Termux CRT is the same Termux UI you're used to, with a shader pass on top:
+
+- The **soft keyboard**, extra-keys row, **copy/paste**, text selection, URL
+  selection, session list, and the side drawer all behave exactly like native
+  Termux — they're the same views, unmodified.
+- **Long-press the terminal** to get Termux's text-selection toolbar, then
+  tap **More → CRT Settings** to open the shader settings. (You can also
+  long-press the settings button in the drawer for a direct shortcut.)
+- Settings are applied live on the next frame. Toggle the master **CRT
+  Overlay** switch off and the TerminalView shows through unfiltered — same
+  pixels Termux would have drawn.
+
+The settings screen exposes:
+
+- **Font** — system monospace, plus bundled VT323, Press Start 2P, Source
+  Code Pro, Fira Code, JetBrains Mono, IBM Plex Mono. Size is independent.
+- **Color overrides** — background and a luma-keyed text recolor (white text
+  → your chosen color, ANSI colors collapsed to a single phosphor). Preset
+  swatches for the classic CRT palettes plus R/G/B sliders.
+- **Effects** (each with an on/off switch and a 0–1 intensity slider):
+  Bloom, Burn-in, Static Noise, Jitter, Glow Line, Screen Curvature, Ambient
+  Light, Flicker, Horizontal Sync, RGB Shift.
+- **Profiles** — save the whole snapshot under a name, switch between named
+  profiles, and export/import a bundle via the system file picker.
 
 ## Build
 
@@ -136,17 +186,19 @@ through F-Droid or Play**. Sideloading is the only delivery path.
 
 ## Tweaking the shader
 
-All knobs live at the top of [`app/src/main/assets/shaders/crt.frag`](app/src/main/assets/shaders/crt.frag):
+The user-facing knobs live in the in-app Settings screen (master toggle,
+font, colors, ten effects, profile save/load/export/import). Each effect
+maps 1:1 onto a `u<Effect>On` / `u<Effect>Strength` uniform in the shader.
 
-| Constant | What it does |
+If you want to change the shader itself, the GLSL is in
+[`app/src/main/assets/shaders/`](app/src/main/assets/shaders/):
+
+| File | What it does |
 | --- | --- |
-| `CURVATURE` | Barrel-distortion strength (0 = flat screen) |
-| `SCANLINE_STRENGTH` | Horizontal scanline darkness |
-| `MASK_STRENGTH` | RGB phosphor / aperture grille |
-| `CHROMA_OFFSET` | Chromatic aberration (UV units) |
-| `VIGNETTE_POWER` | Corner darkening |
-| `FLICKER_AMOUNT` | 60Hz brightness flicker |
-| `BRIGHTNESS` | Global multiplier |
+| `crt.vert` | Fullscreen-quad vertex shader. |
+| `crt.frag` | Main pass: curvature, scanline mask, RGB shift, bloom mix, burn-in, ambient, flicker, hsync, static, text/bg color overrides. |
+| `brightpass.frag` | Thresholded copy of the source frame, used as bloom input. |
+| `blur.frag` | Separable Gaussian blur, run horizontally then vertically over the brightpass into the bloom texture. |
 
 ## Why an extension, not a fork
 
@@ -171,9 +223,10 @@ APIs that `terminal-emulator` / `terminal-view` / `termux-shared` depend on.
   cannot use this app (different signing key, shared UID handshake fails).
 - Capture bitmap re-renders every invalidate; could skip when the emulator
   hasn't dirtied.
-- Shader is GLES 2; GLES 3 would unlock real bloom, separable blur, etc.
+- Requires a GLES 3 capable device (basically anything Android 5+).
 - Accessibility (TalkBack) is almost certainly broken since the user-visible
-  surface is a GL texture, not real text.
+  surface is a GL texture, not real text. Selection and copy still work
+  because they go through the underlying TerminalView.
 
 ## License
 
