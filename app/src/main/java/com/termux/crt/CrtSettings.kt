@@ -79,6 +79,9 @@ data class CrtSettings(
         private fun strKey(effect: String) = "fx_${effect}_str"
 
         const val KEY_CRT_ENABLED = "crt_enabled"
+        // UI-only toggle (does not affect the live terminal renderer): show
+        // or hide the live-effect preview inside SettingsActivity.
+        const val KEY_PREVIEW_ENABLED = "preview_enabled"
         const val KEY_FONT_SIZE_SP = "font_size_sp"
         const val KEY_FONT = "font"
         const val KEY_BG_COLOR_ON = "bg_color_on"

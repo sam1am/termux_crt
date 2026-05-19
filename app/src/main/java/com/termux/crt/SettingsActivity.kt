@@ -2,6 +2,7 @@ package com.termux.crt
 
 import android.app.AlertDialog
 import android.content.Intent
+import android.content.SharedPreferences
 import android.graphics.Color
 import android.graphics.Typeface
 import android.net.Uri
@@ -13,6 +14,7 @@ import android.view.ViewGroup.LayoutParams.MATCH_PARENT
 import android.view.ViewGroup.LayoutParams.WRAP_CONTENT
 import android.widget.Button
 import android.widget.EditText
+import android.widget.FrameLayout
 import android.widget.LinearLayout
 import android.widget.ScrollView
 import android.widget.SeekBar
@@ -43,6 +45,35 @@ class SettingsActivity : AppCompatActivity() {
     private lateinit var exportLauncher: ActivityResultLauncher<Intent>
     private lateinit var importLauncher: ActivityResultLauncher<Intent>
 
+    // Live preview pinned above the scrolling settings; the renderer pulls
+    // its frames from [previewSurface] (a static, hand-painted sample
+    // bitmap) so the shader effects animate over consistent content.
+    private lateinit var preview: CrtSurfaceView
+    private lateinit var previewSurface: PreviewTerminalSurface
+    private lateinit var root: LinearLayout
+    private lateinit var scroll: ScrollView
+    private lateinit var previewFrame: FrameLayout
+    private var previewNormalHeightPx: Int = 0
+    private var previewEnabled: Boolean = true
+
+    // Theater-mode state: when a slider is being dragged, the row containing
+    // it stays visible and every other top-level row in [root] is hidden, and
+    // the preview expands to fill the freed vertical space.
+    private val theaterPrevVisibilities = mutableMapOf<View, Int>()
+    private var activeRowTop: View? = null
+
+    // Listens for any pref edit (every slider change writes immediately) and
+    // forwards the fresh settings to the preview renderer. Re-rasterizes the
+    // sample bitmap when the chosen font changes.
+    private val prefsListener = SharedPreferences.OnSharedPreferenceChangeListener { _, key ->
+        if (!::preview.isInitialized) return@OnSharedPreferenceChangeListener
+        val s = CrtSettings.load(this)
+        preview.applySettings(s.copy(crtEnabled = true))
+        if (key == CrtSettings.KEY_FONT) {
+            previewSurface.setStyle(TerminalFont.typeface(this, s.font))
+        }
+    }
+
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         title = getString(R.string.settings_title)
@@ -65,7 +96,7 @@ class SettingsActivity : AppCompatActivity() {
         val density = resources.displayMetrics.density
         fun dp(v: Int) = (v * density).toInt()
 
-        val root = LinearLayout(this).apply {
+        root = LinearLayout(this).apply {
             orientation = LinearLayout.VERTICAL
             setBackgroundColor(Color.BLACK)
             setPadding(dp(16), dp(16), dp(16), dp(16))
@@ -74,6 +105,21 @@ class SettingsActivity : AppCompatActivity() {
         // ----- Master CRT toggle. -----
         root.addView(sectionHeader("CRT Overlay"))
         root.addView(masterToggle(s.crtEnabled))
+        previewEnabled = CrtSettings.prefs(this).getBoolean(CrtSettings.KEY_PREVIEW_ENABLED, true)
+        root.addView(Switch(this).apply {
+            text = "Show live preview"
+            setTextColor(Color.WHITE)
+            textSize = 16f
+            isChecked = previewEnabled
+            setOnCheckedChangeListener { _, checked ->
+                previewEnabled = checked
+                CrtSettings.prefs(this@SettingsActivity).edit {
+                    putBoolean(CrtSettings.KEY_PREVIEW_ENABLED, checked)
+                }
+                previewFrame.visibility = if (checked) View.VISIBLE else View.GONE
+            }
+            layoutParams = LinearLayout.LayoutParams(MATCH_PARENT, WRAP_CONTENT)
+        })
 
         root.addView(divider(dp(1)))
 
@@ -143,16 +189,119 @@ class SettingsActivity : AppCompatActivity() {
             }
         })
 
-        val scroll = ScrollView(this).apply {
+        scroll = ScrollView(this).apply {
             setBackgroundColor(Color.BLACK)
             addView(root, ViewGroup.LayoutParams(MATCH_PARENT, WRAP_CONTENT))
         }
-        setContentView(scroll)
+
+        // Compact full-width preview at the top in normal mode. When the
+        // user begins dragging a slider we expand it to fill the screen
+        // (see [enterTheaterMode]) — the small/wide aspect in normal mode
+        // is just a glanceable indicator; theater mode is where the user
+        // actually tunes.
+        previewSurface = PreviewTerminalSurface().apply {
+            setStyle(TerminalFont.typeface(this@SettingsActivity, s.font))
+        }
+        preview = CrtSurfaceView(this).apply {
+            attach(previewSurface)
+            applySettings(s.copy(crtEnabled = true))
+        }
+        previewNormalHeightPx = dp(140)
+        previewFrame = FrameLayout(this).apply {
+            setBackgroundColor(Color.BLACK)
+            layoutParams = LinearLayout.LayoutParams(MATCH_PARENT, previewNormalHeightPx)
+            addView(preview, FrameLayout.LayoutParams(MATCH_PARENT, MATCH_PARENT))
+            visibility = if (previewEnabled) View.VISIBLE else View.GONE
+        }
+
+        val outer = LinearLayout(this).apply {
+            orientation = LinearLayout.VERTICAL
+            setBackgroundColor(Color.BLACK)
+            addView(previewFrame)
+            addView(scroll, LinearLayout.LayoutParams(MATCH_PARENT, 0, 1f))
+        }
+        setContentView(outer)
+
+        CrtSettings.prefs(this).registerOnSharedPreferenceChangeListener(prefsListener)
+    }
+
+    override fun onResume() {
+        super.onResume()
+        if (::preview.isInitialized) preview.onResume()
+    }
+
+    override fun onPause() {
+        if (::preview.isInitialized) preview.onPause()
+        super.onPause()
+    }
+
+    override fun onDestroy() {
+        CrtSettings.prefs(this).unregisterOnSharedPreferenceChangeListener(prefsListener)
+        super.onDestroy()
     }
 
     override fun onSupportNavigateUp(): Boolean {
         finish()
         return true
+    }
+
+    // ----- Theater mode -----
+
+    /**
+     * Expand the preview to fill the screen above the active slider while
+     * the user is dragging — every other top-level row in [root] is hidden,
+     * the preview gets weight=1, and the ScrollView shrinks to fit just the
+     * row containing the slider. Restored on [exitTheaterMode].
+     */
+    private fun enterTheaterMode(sb: SeekBar) {
+        if (!::root.isInitialized || activeRowTop != null || !previewEnabled) return
+        val topLevel = findTopLevelChild(sb, root) ?: return
+        activeRowTop = topLevel
+
+        for (i in 0 until root.childCount) {
+            val child = root.getChildAt(i)
+            if (child !== topLevel) {
+                theaterPrevVisibilities[child] = child.visibility
+                child.visibility = View.GONE
+            }
+        }
+        (previewFrame.layoutParams as LinearLayout.LayoutParams).apply {
+            height = 0
+            weight = 1f
+        }
+        (scroll.layoutParams as LinearLayout.LayoutParams).apply {
+            height = ViewGroup.LayoutParams.WRAP_CONTENT
+            weight = 0f
+        }
+        previewFrame.requestLayout()
+        scroll.requestLayout()
+    }
+
+    private fun exitTheaterMode() {
+        if (activeRowTop == null) return
+        for ((v, vis) in theaterPrevVisibilities) v.visibility = vis
+        theaterPrevVisibilities.clear()
+        (previewFrame.layoutParams as LinearLayout.LayoutParams).apply {
+            height = previewNormalHeightPx
+            weight = 0f
+        }
+        (scroll.layoutParams as LinearLayout.LayoutParams).apply {
+            height = 0
+            weight = 1f
+        }
+        previewFrame.requestLayout()
+        scroll.requestLayout()
+        activeRowTop = null
+    }
+
+    private fun findTopLevelChild(view: View, parent: ViewGroup): View? {
+        var current: View = view
+        var p: ViewGroup? = view.parent as? ViewGroup
+        while (p != null && p !== parent) {
+            current = p
+            p = current.parent as? ViewGroup
+        }
+        return if (p === parent) current else null
     }
 
     // ----- Row builders -----
@@ -207,8 +356,8 @@ class SettingsActivity : AppCompatActivity() {
                 valueLabel.text = String.format("%.2f", v)
                 saveEffect(key, sw.isChecked, v)
             }
-            override fun onStartTrackingTouch(sb: SeekBar?) {}
-            override fun onStopTrackingTouch(sb: SeekBar?) {}
+            override fun onStartTrackingTouch(sb: SeekBar?) { sb?.let { enterTheaterMode(it) } }
+            override fun onStopTrackingTouch(sb: SeekBar?) { exitTheaterMode() }
         })
 
         container.addView(sw)
