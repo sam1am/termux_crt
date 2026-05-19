@@ -61,6 +61,7 @@ private fun profileToJson(p: CrtProfile): JSONObject {
         put("bgColor", s.bgColor)
         put("textColorOverride", s.textColorOverride)
         put("textColor", s.textColor)
+        put("textColorMix", s.textColorMix.toDouble())
         put("bloom", effectJson(s.bloom))
         put("burnin", effectJson(s.burnin))
         put("staticNoise", effectJson(s.staticNoise))
@@ -85,6 +86,7 @@ private fun profileFromJson(obj: JSONObject): CrtProfile {
         bgColor = obj.optInt("bgColor", d.bgColor),
         textColorOverride = obj.optBoolean("textColorOverride", d.textColorOverride),
         textColor = obj.optInt("textColor", d.textColor),
+        textColorMix = obj.optDouble("textColorMix", d.textColorMix.toDouble()).toFloat(),
         bloom = effectFromJson(obj.optJSONObject("bloom"), d.bloom),
         burnin = effectFromJson(obj.optJSONObject("burnin"), d.burnin),
         staticNoise = effectFromJson(obj.optJSONObject("staticNoise"), d.staticNoise),

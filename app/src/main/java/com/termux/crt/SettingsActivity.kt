@@ -106,6 +106,8 @@ class SettingsActivity : AppCompatActivity() {
             initialColor = s.textColor,
             onKey = CrtSettings.KEY_TEXT_COLOR_ON,
             colorKey = CrtSettings.KEY_TEXT_COLOR,
+            mixKey = CrtSettings.KEY_TEXT_COLOR_MIX,
+            initialMix = s.textColorMix,
         ))
 
         root.addView(divider(dp(1)))
@@ -230,6 +232,8 @@ class SettingsActivity : AppCompatActivity() {
         initialColor: Int,
         onKey: String,
         colorKey: String,
+        mixKey: String? = null,
+        initialMix: Float = 1f,
     ): View {
         val density = resources.displayMetrics.density
         fun dp(v: Int) = (v * density).toInt()
@@ -345,11 +349,53 @@ class SettingsActivity : AppCompatActivity() {
             })
         }
 
+        // Optional Mix slider — only present when the caller passed a [mixKey].
+        // At 1.0 the color override fully replaces the source; at lower values
+        // the source bleeds through and the override layers on top.
+        var mixSeek: SeekBar? = null
+        var mixRow: LinearLayout? = null
+        if (mixKey != null) {
+            val nameLabel = TextView(this).apply {
+                text = "Mix"
+                setTextColor(Color.WHITE)
+                layoutParams = LinearLayout.LayoutParams(dp(36), WRAP_CONTENT)
+            }
+            val valueLabel = TextView(this).apply {
+                text = String.format("%.2f", initialMix)
+                setTextColor(Color.WHITE)
+                gravity = Gravity.END
+                layoutParams = LinearLayout.LayoutParams(dp(48), WRAP_CONTENT)
+            }
+            mixSeek = SeekBar(this).apply {
+                max = 100
+                progress = (initialMix * 100).roundToInt().coerceIn(0, 100)
+                isEnabled = sw.isChecked
+                layoutParams = LinearLayout.LayoutParams(0, WRAP_CONTENT, 1f)
+                setOnSeekBarChangeListener(object : SeekBar.OnSeekBarChangeListener {
+                    override fun onProgressChanged(sb: SeekBar?, p: Int, fromUser: Boolean) {
+                        val v = p / 100f
+                        valueLabel.text = String.format("%.2f", v)
+                        CrtSettings.prefs(this@SettingsActivity).edit { putFloat(mixKey, v) }
+                    }
+                    override fun onStartTrackingTouch(sb: SeekBar?) {}
+                    override fun onStopTrackingTouch(sb: SeekBar?) {}
+                })
+            }
+            mixRow = LinearLayout(this).apply {
+                orientation = LinearLayout.HORIZONTAL
+                layoutParams = LinearLayout.LayoutParams(MATCH_PARENT, WRAP_CONTENT)
+                addView(nameLabel)
+                addView(mixSeek)
+                addView(valueLabel)
+            }
+        }
+
         sw.setOnCheckedChangeListener { _, checked ->
             CrtSettings.prefs(this@SettingsActivity).edit { putBoolean(onKey, checked) }
             (rSeek.getChildAt(1) as SeekBar).isEnabled = checked
             (gSeek.getChildAt(1) as SeekBar).isEnabled = checked
             (bSeek.getChildAt(1) as SeekBar).isEnabled = checked
+            mixSeek?.isEnabled = checked
         }
 
         container.addView(sw)
@@ -358,6 +404,7 @@ class SettingsActivity : AppCompatActivity() {
         container.addView(rSeek)
         container.addView(gSeek)
         container.addView(bSeek)
+        mixRow?.let { container.addView(it) }
         return container
     }
 

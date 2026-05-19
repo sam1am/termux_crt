@@ -55,6 +55,8 @@ data class CrtSettings(
     val bgColor: Int,
     val textColorOverride: Boolean,
     val textColor: Int,
+    val textColorMix: Float,
+
     val bloom: Effect,
     val burnin: Effect,
     val staticNoise: Effect,
@@ -83,6 +85,7 @@ data class CrtSettings(
         const val KEY_BG_COLOR = "bg_color"
         const val KEY_TEXT_COLOR_ON = "text_color_on"
         const val KEY_TEXT_COLOR = "text_color"
+        const val KEY_TEXT_COLOR_MIX = "text_color_mix"
 
         val DEFAULT = CrtSettings(
             crtEnabled = false,
@@ -92,6 +95,7 @@ data class CrtSettings(
             bgColor = Color.BLACK,
             textColorOverride = false,
             textColor = Color.WHITE,
+            textColorMix = 1.0f,
             bloom       = Effect(true,  0.5f),
             burnin      = Effect(true,  0.5f),
             staticNoise = Effect(false, 0.2f),
@@ -121,6 +125,7 @@ data class CrtSettings(
                 bgColor = p.getInt(KEY_BG_COLOR, DEFAULT.bgColor),
                 textColorOverride = p.getBoolean(KEY_TEXT_COLOR_ON, DEFAULT.textColorOverride),
                 textColor = p.getInt(KEY_TEXT_COLOR, DEFAULT.textColor),
+                textColorMix = p.getFloat(KEY_TEXT_COLOR_MIX, DEFAULT.textColorMix),
                 bloom       = fx("bloom",       DEFAULT.bloom),
                 burnin      = fx("burnin",      DEFAULT.burnin),
                 staticNoise = fx("static",      DEFAULT.staticNoise),
@@ -155,6 +160,7 @@ data class CrtSettings(
                 putInt(KEY_BG_COLOR, s.bgColor)
                 putBoolean(KEY_TEXT_COLOR_ON, s.textColorOverride)
                 putInt(KEY_TEXT_COLOR, s.textColor)
+                putFloat(KEY_TEXT_COLOR_MIX, s.textColorMix)
                 fun writeFx(key: String, e: Effect) {
                     putBoolean(onKey(key), e.enabled)
                     putFloat(strKey(key), e.strength)

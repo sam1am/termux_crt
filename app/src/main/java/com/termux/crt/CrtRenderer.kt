@@ -49,6 +49,7 @@ class CrtRenderer(
     private var uBgColorLoc = 0
     private var uTextColorOnLoc = 0
     private var uTextColorLoc = 0
+    private var uTextColorMixLoc = 0
 
     private val effectUniforms = mutableMapOf<String, Int>()  // name -> location
 
@@ -119,8 +120,9 @@ class CrtRenderer(
         uTimeLoc        = GLES30.glGetUniformLocation(program, "uTime")
         uBgColorOnLoc   = GLES30.glGetUniformLocation(program, "uBgColorOn")
         uBgColorLoc     = GLES30.glGetUniformLocation(program, "uBgColor")
-        uTextColorOnLoc = GLES30.glGetUniformLocation(program, "uTextColorOn")
-        uTextColorLoc   = GLES30.glGetUniformLocation(program, "uTextColor")
+        uTextColorOnLoc  = GLES30.glGetUniformLocation(program, "uTextColorOn")
+        uTextColorLoc    = GLES30.glGetUniformLocation(program, "uTextColor")
+        uTextColorMixLoc = GLES30.glGetUniformLocation(program, "uTextColorMix")
 
         // Each effect has matched on/strength uniforms in the shader. Cache the
         // locations once so we don't re-look-them-up every frame.
@@ -296,6 +298,7 @@ class CrtRenderer(
         GLES30.glUniform1f(uTextColorOnLoc, if (s.textColorOverride) 1f else 0f)
         rgbFromColor(s.textColor, rgb)
         GLES30.glUniform3f(uTextColorLoc, rgb[0], rgb[1], rgb[2])
+        GLES30.glUniform1f(uTextColorMixLoc, s.textColorMix)
     }
 
     private val rgb = FloatArray(3)

@@ -41,6 +41,7 @@ uniform float uBgColorOn;
 uniform vec3  uBgColor;
 uniform float uTextColorOn;
 uniform vec3  uTextColor;
+uniform float uTextColorMix;   // 0..1 — blend between original ANSI color and monochrome phosphor
 
 // ---------- Helpers ----------
 
@@ -121,11 +122,16 @@ void main() {
     vec3 col = sampleTerminal(uv);
 
     // -------- Text color override (monochrome phosphor) --------
-    // Preserve luminance, swap hue. Done before bloom so the additive halo
-    // glows in the same phosphor color.
+    // Re-tints terminal output toward the chosen phosphor color. The mix
+    // factor lets the original ANSI colors bleed through: at 1.0 it's a
+    // full monochrome override (luma-scaled phosphor only); at lower
+    // values the original color is preserved and the phosphor tint is
+    // additively layered on top. Done before bloom so the halo glows in
+    // the blended color.
     if (uTextColorOn > 0.5) {
         float luma = dot(col, vec3(0.299, 0.587, 0.114));
-        col = uTextColor * luma;
+        vec3 mono = uTextColor * luma;
+        col = mix(col, mono, uTextColorMix);
     }
 
     // -------- Background color override --------
