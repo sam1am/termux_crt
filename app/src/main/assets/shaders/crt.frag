@@ -20,8 +20,8 @@ uniform float uStaticOn;
 uniform float uStaticStrength;
 uniform float uJitterOn;
 uniform float uJitterStrength;
-uniform float uGlowLineOn;
-uniform float uGlowLineStrength;
+uniform float uGlowlineOn;
+uniform float uGlowlineStrength;
 uniform float uCurvatureOn;
 uniform float uCurvatureStrength;
 uniform float uAmbientOn;
@@ -93,8 +93,8 @@ void main() {
         float bandFast = step(0.90, sin(uv.y * 51.0 + uTime * 6.0)  * 0.5 + 0.5);
         float bandSlow = step(0.88, sin(uv.y *  9.0 + uTime * 1.7)  * 0.5 + 0.5);
         float slip = hash(vec2(floor(uv.y * 700.0), floor(uTime * 12.0))) - 0.5;
-        uv.x += (bandFast * 0.18 + bandSlow * 0.10) * slip * uHsyncStrength;
-        hsyncBand = (bandFast + bandSlow * 0.7) * uHsyncStrength;
+        uv.x += (bandFast * 0.06 + bandSlow * 0.035) * slip * uHsyncStrength;
+        hsyncBand = (bandFast + bandSlow * 0.7) * uHsyncStrength * 0.5;
     }
 
     // -------- Jitter (per-scanline horizontal wobble) --------
@@ -153,15 +153,24 @@ void main() {
         col = max(col, prev * decay);
     }
 
-    // -------- Glow line (scrolling refresh beam) --------
-    // Slow scroll. Wider beam, brighter additive halo so it's unmistakable
-    // even on a black background.
-    if (uGlowLineOn > 0.5) {
-        float lineY = fract(uTime * 0.20);
-        float d = abs(uv.y - lineY);
-        float beam = exp(-d * 50.0);                              // softer Gaussian
-        col *= 1.0 + beam * 0.6 * uGlowLineStrength;              // local amplify under beam
-        col += vec3(0.55, 0.7, 0.55) * beam * 0.45 * uGlowLineStrength;  // visible additive glow
+    // -------- Glow line (rolling refresh bar) --------
+    // Bounded-height band (~20% screen) so the effect terminates cleanly
+    // instead of fading across the whole frame as a contrast-killing
+    // gradient. Band intensity ramps from 0 at the top up to a peak at the
+    // leading edge, then drops sharply below. The band itself has no hue;
+    // it just pulls its pixels toward middle gray, so it reads as a soft
+    // contrast dip rolling down the screen.
+    if (uGlowlineOn > 0.5) {
+        float lineY = fract(uTime * 0.10);
+        float bandHeight = 0.20;
+        float trail = smoothstep(lineY - bandHeight, lineY, uv.y);   // 0 at top of band → 1 at lead
+        float lead  = 1.0 - smoothstep(lineY, lineY + 0.008, uv.y);  // sharp leading edge
+        float beam  = trail * lead;
+        float strength = sqrt(uGlowlineStrength);                    // perceptual taper
+        // Pure contrast decrease — pull band pixels toward middle gray.
+        // No hue of its own: bright pixels dim, dark pixels lift slightly,
+        // colored content desaturates a touch. Very subtle by design.
+        col = mix(col, vec3(0.5), beam * strength * 0.03);
     }
 
     // -------- Flicker --------
