@@ -90,8 +90,8 @@ void main() {
     // empty (black) background — not just where there's text to displace.
     float hsyncBand = 0.0;
     if (uHsyncOn > 0.5) {
-        float bandFast = step(0.90, sin(uv.y * 51.0 + uTime * 6.0)  * 0.5 + 0.5);
-        float bandSlow = step(0.88, sin(uv.y *  9.0 + uTime * 1.7)  * 0.5 + 0.5);
+        float bandFast = step(0.90, sin(uv.y * 25.0 + uTime * 3.0)   * 0.5 + 0.5);
+        float bandSlow = step(0.88, sin(uv.y *  4.5 + uTime * 0.85)  * 0.5 + 0.5);
         float slip = hash(vec2(floor(uv.y * 700.0), floor(uTime * 12.0))) - 0.5;
         uv.x += (bandFast * 0.06 + bandSlow * 0.035) * slip * uHsyncStrength;
         hsyncBand = (bandFast + bandSlow * 0.7) * uHsyncStrength * 0.5;
