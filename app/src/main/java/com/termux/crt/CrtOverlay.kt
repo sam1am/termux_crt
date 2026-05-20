@@ -27,12 +27,25 @@ class CrtOverlay(
     private val mirror = TerminalViewMirror(terminalView)
     private var attached = false
     private var rendererAttached = false
+    private var lastSettings: CrtSettings = CrtSettings.DEFAULT
+    private var suspendedForDrawer = false
 
     fun onCreate() {
         // Pure black under the GL surface so any sliver outside the curve
         // matches the TerminalView background.
         terminalView.setBackgroundColor(Color.BLACK)
         applySettings(CrtSettings.load(activity))
+    }
+
+    /**
+     * Suspend the CRT layer while the side drawer is non-closed. The GL surface
+     * uses `setZOrderOnTop(true)` and would otherwise occlude the drawer, so we
+     * temporarily hide it and reveal the plain TerminalView underneath.
+     */
+    fun setDrawerSuspended(suspended: Boolean) {
+        if (suspendedForDrawer == suspended) return
+        suspendedForDrawer = suspended
+        applyVisibility(lastSettings)
     }
 
     fun onResume() {
@@ -54,13 +67,18 @@ class CrtOverlay(
     }
 
     private fun applySettings(s: CrtSettings) {
+        lastSettings = s
         if (!rendererAttached) {
             crtSurfaceView.attach(mirror)
             rendererAttached = true
         }
         crtSurfaceView.applySettings(s)
+        applyVisibility(s)
+    }
 
-        if (s.crtEnabled) {
+    private fun applyVisibility(s: CrtSettings) {
+        val showCrt = s.crtEnabled && !suspendedForDrawer
+        if (showCrt) {
             if (!attached) { mirror.attach(); attached = true }
             terminalView.alpha = 0f
             crtSurfaceView.visibility = View.VISIBLE

@@ -46,6 +46,20 @@
                     android:scrollbarThumbVertical="@drawable/terminal_scroll_shape"
                     android:scrollbars="vertical"
                     tools:ignore="UnusedAttribute" />
+
+                <!-- Hamburger affordance to open the sessions drawer. Edge-swipe
+                     also works, but this is the discoverable path; the icon
+                     also lives over the CRT surface so it's always visible. -->
+                <ImageButton
+                    android:id="@+id/sessions_drawer_button"
+                    android:layout_width="36dp"
+                    android:layout_height="36dp"
+                    android:layout_gravity="top|start"
+                    android:layout_margin="4dp"
+                    android:background="@android:color/transparent"
+                    android:contentDescription="@string/action_open_sessions_drawer"
+                    android:src="@android:drawable/ic_menu_sort_by_size"
+                    android:alpha="0.55" />
             </FrameLayout>
 
             <LinearLayout

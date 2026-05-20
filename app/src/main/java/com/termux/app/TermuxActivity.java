@@ -253,6 +253,23 @@ public final class TermuxActivity extends AppCompatActivity implements ServiceCo
         if (crtSurfaceView != null && mTerminalView != null) {
             mCrtOverlay = new com.termux.crt.CrtOverlay(this, mTerminalView, crtSurfaceView);
             mCrtOverlay.onCreate();
+
+            // The GL surface uses setZOrderOnTop(true) and would otherwise
+            // occlude the side drawer. Suspend the CRT layer while the drawer
+            // is anything other than fully closed.
+            DrawerLayout drawerLayout = getDrawer();
+            if (drawerLayout != null) {
+                drawerLayout.addDrawerListener(new DrawerLayout.SimpleDrawerListener() {
+                    @Override
+                    public void onDrawerSlide(@NonNull View drawerView, float slideOffset) {
+                        if (mCrtOverlay != null) mCrtOverlay.setDrawerSuspended(slideOffset > 0f);
+                    }
+                    @Override
+                    public void onDrawerClosed(@NonNull View drawerView) {
+                        if (mCrtOverlay != null) mCrtOverlay.setDrawerSuspended(false);
+                    }
+                });
+            }
         }
 
         setTerminalToolbarView(savedInstanceState);
@@ -262,6 +279,8 @@ public final class TermuxActivity extends AppCompatActivity implements ServiceCo
         setNewSessionButtonView();
 
         setToggleKeyboardView();
+
+        setSessionsDrawerButtonView();
 
         registerForContextMenu(mTerminalView);
 
@@ -613,6 +632,17 @@ public final class TermuxActivity extends AppCompatActivity implements ServiceCo
         findViewById(R.id.toggle_keyboard_button).setOnLongClickListener(v -> {
             toggleTerminalToolbar();
             return true;
+        });
+    }
+
+    private void setSessionsDrawerButtonView() {
+        View button = findViewById(R.id.sessions_drawer_button);
+        if (button == null) return;
+        button.setOnClickListener(v -> {
+            DrawerLayout drawer = getDrawer();
+            if (drawer == null) return;
+            if (drawer.isDrawerOpen(Gravity.LEFT)) drawer.closeDrawer(Gravity.LEFT);
+            else drawer.openDrawer(Gravity.LEFT);
         });
     }
 
