@@ -61,6 +61,7 @@ class SettingsActivity : AppCompatActivity() {
     // the preview expands to fill the freed vertical space.
     private val theaterPrevVisibilities = mutableMapOf<View, Int>()
     private var activeRowTop: View? = null
+    private var theaterSavedScrollY: Int = 0
 
     // Listens for any pref edit (every slider change writes immediately) and
     // forwards the fresh settings to the preview renderer. Re-rasterizes the
@@ -257,6 +258,7 @@ class SettingsActivity : AppCompatActivity() {
         if (!::root.isInitialized || activeRowTop != null || !previewEnabled) return
         val topLevel = findTopLevelChild(sb, root) ?: return
         activeRowTop = topLevel
+        theaterSavedScrollY = scroll.scrollY
 
         for (i in 0 until root.childCount) {
             val child = root.getChildAt(i)
@@ -292,6 +294,8 @@ class SettingsActivity : AppCompatActivity() {
         previewFrame.requestLayout()
         scroll.requestLayout()
         activeRowTop = null
+        val target = theaterSavedScrollY
+        scroll.post { scroll.scrollTo(0, target) }
     }
 
     private fun findTopLevelChild(view: View, parent: ViewGroup): View? {
